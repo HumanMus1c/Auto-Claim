@@ -6,3 +6,20 @@ __pycache__/
 # WorkBuddy local workspace data (contains credentials / memory / automation config)
 .workbuddy/
 signin.log
+
+# GUI demos (个人实验，不属于上游项目)
+demos/__pycache__/
+demos/config.ini
+demos/debug.log
+demos/webview/debug.log
+demos/webview/run.log
+demos/webview/assets/*.log
+demos/webview/build/
+demos/webview/__pycache__/
+WorkBuddyConsole.exe
+
+# WebView2 运行时会在工作目录生成 crashpad 日志
+debug.log
+
+# 控制台的运行时数据（日志/缓存）实际落在用户目录：
+# %LOCALAPPDATA%\WorkBuddyConsole\ —— 在仓库外，无需 ignore。

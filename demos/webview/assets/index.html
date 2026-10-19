@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkBuddy 控制台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- WorkBuddy 标志 · 纯线条版。
+     stroke 走 currentColor，所以只要给 .logo 设 color，亮/暗主题自动反色，
+     不需要维护两份图标。几何与 make_icon.py / icon.svg 保持一致。 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="wb-icon" viewBox="0 0 256 256">
+    <g fill="none" stroke="currentColor" stroke-width="11"
+       stroke-linecap="round" stroke-linejoin="round">
+      <rect x="27" y="27" width="202" height="202" rx="53"/>
+      <path d="M84 62 C102 70 120 82 138 92
+               C154 76 168 56 181 44
+               C202 74 219 110 223 140
+               C221 178 210 202 198 214
+               C176 228 140 232 112 226
+               C80 216 52 194 44 160
+               C42 122 62 80 84 62 Z"/>
+      <rect x="154" y="141.5" width="32" height="17" rx="8.5"
+            transform="rotate(34 170 150)"/>
+      <rect x="112" y="173.5" width="32" height="17" rx="8.5"
+            transform="rotate(34 128 182)"/>
+    </g>
+  </symbol>
+</svg>
+
+<header class="topbar">
+  <div class="brand">
+    <svg class="logo" viewBox="0 0 256 256" aria-hidden="true"><use href="#wb-icon"/></svg>
+    <h1>WorkBuddy 控制台</h1>
+    <span class="badge" id="badge">连接中…</span>
+  </div>
+  <div class="topbar-right">
+    <span class="meta" id="env">Python — · —</span>
+    <span class="meta sep" id="envSignin">signin.py —</span>
+    <button class="icon-btn" id="themeToggle" title="切换亮/暗主题">◐</button>
+  </div>
+</header>
+
+<main>
+  <!-- ① 指标卡片 -->
+  <section class="cards" id="cards">
+    <article class="card">
+      <span class="card-label">今日积分</span>
+      <strong class="card-value" id="vCredit">—</strong>
+      <span class="card-hint" id="hCredit">等待查询</span>
+    </article>
+    <article class="card">
+      <span class="card-label">连签天数</span>
+      <strong class="card-value" id="vStreak">—</strong>
+      <span class="card-hint" id="hStreak">等待查询</span>
+    </article>
+    <article class="card">
+      <span class="card-label">累计积分</span>
+      <strong class="card-value" id="vTotal">—</strong>
+      <span class="card-hint" id="hTotal">等待查询</span>
+    </article>
+    <article class="card">
+      <span class="card-label">凭据格式</span>
+      <strong class="card-value small" id="vCred">—</strong>
+      <span class="card-hint" id="hCred">等待体检</span>
+    </article>
+  </section>
+
+  <!-- ② 操作按钮 -->
+  <section class="actions">
+    <div class="act-group" id="actGroup"></div>
+    <div class="spacer"></div>
+    <button class="btn ghost" id="btnTasks">刷新任务</button>
+    <button class="btn ghost" id="btnClear">清空日志</button>
+  </section>
+  <p class="hint" id="actionHint">只读查询不会改动服务端状态；带「写操作」标记的会真实领取。</p>
+
+  <!-- ③ 云端任务（独占一行） -->
+  <section class="pane pane-tasks">
+    <div class="pane-head">
+      <h2>云端任务</h2>
+      <div class="tabs" id="taskTabs">
+        <button class="tab active" data-tab="todo">未完成 <b id="cntTodo">0</b></button>
+        <button class="tab" data-tab="done">已完成 <b id="cntDone">0</b></button>
+      </div>
+    </div>
+    <div class="tasklist" id="tasklist">
+      <p class="empty">点击「刷新任务」拉取</p>
+    </div>
+  </section>
+
+  <!-- ④ 签到状态 + 本月签到（同一行） -->
+  <section class="row2">
+    <div class="pane pane-cal">
+      <div class="pane-head"><h2>签到状态</h2></div>
+      <dl class="kv" id="kv">
+        <div><dt>今日已签</dt><dd>—</dd></div>
+        <div><dt>连签天数</dt><dd>—</dd></div>
+        <div><dt>累计积分</dt><dd>—</dd></div>
+        <div><dt>连签奖励日</dt><dd>—</dd></div>
+        <div><dt>本周签到</dt><dd>—</dd></div>
+        <div><dt>活动</dt><dd>—</dd></div>
+      </dl>
+    </div>
+
+    <div class="pane pane-cal">
+      <div class="pane-head"><h2>本月签到</h2></div>
+      <div class="cal" id="cal">
+        <p class="empty">执行一次查询后显示</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ⑤ 运行日志（最后独占整行） -->
+  <section class="pane pane-log">
+    <div class="pane-head">
+      <h2>运行日志</h2>
+      <div class="log-tools">
+        <label class="autoscroll">
+          <input type="checkbox" id="autoScroll" checked>
+          <span>自动滚动</span>
+        </label>
+        <button class="mini-btn" id="btnCopy" title="复制全部日志到剪贴板">复制</button>
+      </div>
+    </div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>
