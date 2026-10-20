@@ -22,3 +22,6 @@ debug.log
 
 # 控制台的运行时数据（日志/缓存）实际落在用户目录：
 # %LOCALAPPDATA%\WorkBuddyDashboard\ —— 在仓库外，无需 ignore。
+
+# Qoder CN 每日 Credits 领取日志
+qoder_signin.log
