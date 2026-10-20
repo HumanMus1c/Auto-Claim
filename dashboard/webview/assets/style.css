@@ -222,6 +222,134 @@ body {
   font-size: 11px;
 }
 
+/* ---------- 侧边栏 + 页面 ---------- */
+
+.shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.sidebar {
+  flex: 0 0 176px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 10px 12px;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  min-height: 0;
+}
+
+.side-title {
+  padding: 0 8px 7px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .8px;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.side-tab {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 9px 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+}
+
+.side-tab:hover { background: var(--surface-2); }
+
+.side-tab.active {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.side-badge {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+.side-tab.active .side-badge {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.side-badge.q { font-family: "Cascadia Mono", Consolas, monospace; }
+
+.side-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.side-text b {
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-text small {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.side-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--border);
+}
+.side-dot.ok { background: var(--ok); }
+.side-dot.warn { background: var(--warn); }
+.side-dot.err { background: var(--err); }
+.side-dot.busy { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+
+.side-foot {
+  margin-top: auto;
+  padding: 10px 9px 2px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.side-foot-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: .3px;
+}
+.side-foot-value {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.page[hidden] { display: none; }
+
 /* ---------- 主体 ---------- */
 
 /* main 允许纵向滚动：窗口不够高时内容可滚动，
@@ -446,6 +574,76 @@ main {
   white-space: nowrap;
 }
 .svc-log:empty { display: none; }
+
+/* ---------- Qoder 监控 ---------- */
+
+.qoder-row {
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, .8fr);
+}
+
+.pane-qoder-campaigns { height: 320px; max-height: 320px; }
+
+.qcamp-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 9px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qcamp-list .empty {
+  margin: 16px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.qcamp {
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  min-width: 0;
+}
+.qcamp:hover { border-color: var(--border); }
+.qcamp.claimed { opacity: .78; }
+
+.qcamp-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.qcamp-key {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qcamp-reward {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--warn);
+  font-variant-numeric: tabular-nums;
+}
+
+.qcamp-meta {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.qoder-detail { height: 320px; max-height: 320px; }
+
+.qoder-log-pane { min-height: 200px; max-height: 280px; }
 
 /* ---------- 成长中心任务 ---------- */
 

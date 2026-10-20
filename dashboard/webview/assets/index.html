@@ -91,7 +91,32 @@
   </div>
 </header>
 
-<main>
+<div class="shell">
+  <!-- 侧边栏：在 WorkBuddy 与 Qoder CN 两个监控页之间切换 -->
+  <aside class="sidebar" aria-label="监控页面切换">
+    <div class="side-title">监控</div>
+    <button class="side-tab active" type="button" data-page="workbuddy">
+      <span class="side-badge">W</span>
+      <span class="side-text">
+        <b>WorkBuddy</b>
+        <small>签到 · 成长中心</small>
+      </span>
+    </button>
+    <button class="side-tab" type="button" data-page="qoder" id="sideQoder">
+      <span class="side-badge q">Q</span>
+      <span class="side-text">
+        <b>Qoder CN</b>
+        <small>每日 100 Credits</small>
+      </span>
+      <span class="side-dot" id="qoderDot"></span>
+    </button>
+    <div class="side-foot">
+      <span class="side-foot-label">Qoder 状态</span>
+      <span class="side-foot-value" id="qoderSideHint">未检测</span>
+    </div>
+  </aside>
+
+  <main class="page active" id="page-workbuddy">
   <!-- ① 指标卡片 -->
   <section class="cards" id="cards">
     <article class="card">
@@ -216,7 +241,102 @@
     </div>
     <div class="log" id="log"></div>
   </section>
-</main>
+  </main>
+
+  <!-- Qoder CN 监控页 -->
+  <main class="page" id="page-qoder" hidden>
+    <section class="cards">
+      <article class="card">
+        <span class="card-label">可领取 Credits</span>
+        <strong class="card-value" id="qCredits">—</strong>
+        <span class="card-hint" id="qCreditsHint">等待查询</span>
+      </article>
+      <article class="card">
+        <span class="card-label">本周期状态</span>
+        <strong class="card-value small" id="qState">—</strong>
+        <span class="card-hint" id="qStateHint">等待查询</span>
+      </article>
+      <article class="card">
+        <span class="card-label">登录态</span>
+        <strong class="card-value small" id="qToken">—</strong>
+        <span class="card-hint" id="qTokenHint">等待体检</span>
+      </article>
+      <article class="card">
+        <span class="card-label">计划任务</span>
+        <strong class="card-value small" id="qTask">—</strong>
+        <span class="card-hint" id="qTaskHint">未检测</span>
+      </article>
+    </section>
+
+    <section class="actions">
+      <button class="btn primary" id="btnQoderRefresh" title="查询 Qoder 活动、登录态与日志">刷新监控</button>
+      <div class="spacer"></div>
+      <button class="btn act" id="btnQoderClaim" title="真实调用领取接口；接口幂等，已领过不会重复发">领取今日 Credits</button>
+    </section>
+    <p class="hint" id="qoderHint">只读刷新不会改动服务端状态；领取按钮会真实调用 Qoder 接口。</p>
+
+    <section class="pane pane-service">
+      <div class="pane-head">
+        <h2>Qoder 计划任务</h2>
+        <div class="svc-head">
+          <span class="svc-pill" id="qsvcState">检测中…</span>
+          <button class="mini-btn" id="btnQSvcRefresh" title="重新读取 QoderDailyCredits 状态" disabled>刷新状态</button>
+        </div>
+      </div>
+      <div class="service-body">
+        <p class="svc-summary" id="qsvcSummary">正在读取 Qoder 计划任务状态…</p>
+        <div class="svc-tasks" id="qsvcTasks"></div>
+        <div class="svc-actions">
+          <button class="btn primary" id="btnQSvcInstall" title="注册或更新 QoderDailyCredits 计划任务" disabled>安装 / 修复</button>
+          <button class="btn ghost" id="btnQSvcEnable" title="恢复按计划自动运行" disabled>启用</button>
+          <button class="btn ghost" id="btnQSvcDisable" title="保留任务但暂停自动运行" disabled>停用</button>
+          <button class="btn ghost" id="btnQSvcRun" title="立即运行一次 Qoder 领取" disabled>立即运行</button>
+          <button class="btn ghost" id="btnQSvcStop" title="结束正在运行的 Qoder 任务" disabled>停止</button>
+          <button class="btn ghost danger" id="btnQSvcUninstall" title="删除 QoderDailyCredits 任务" disabled>卸载</button>
+          <span class="svc-hint">独立于 WorkBuddy 的两个任务</span>
+        </div>
+        <p class="svc-log" id="qsvcLog"></p>
+      </div>
+    </section>
+
+    <section class="row2 qoder-row">
+      <div class="pane pane-qoder-campaigns">
+        <div class="pane-head">
+          <h2>活动与领取状态</h2>
+          <span class="growth-updated" id="qCampaignsAt">尚未刷新</span>
+        </div>
+        <div class="qcamp-list" id="qCampaigns">
+          <p class="empty">打开此页或点击「刷新监控」后显示 Qoder 活动列表</p>
+        </div>
+      </div>
+
+      <div class="pane pane-cal qoder-detail">
+        <div class="pane-head">
+          <h2>登录态与设备</h2>
+        </div>
+        <dl class="kv" id="qKv">
+          <div><dt>账号目录</dt><dd>—</dd></div>
+          <div><dt>令牌来源</dt><dd>—</dd></div>
+          <div><dt>令牌到期</dt><dd>—</dd></div>
+          <div><dt>设备标识</dt><dd>—</dd></div>
+          <div><dt>设备组件</dt><dd>—</dd></div>
+          <div><dt>最近检测</dt><dd>—</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="pane pane-log qoder-log-pane">
+      <div class="pane-head">
+        <h2>Qoder 日志</h2>
+        <div class="log-tools">
+          <span class="growth-updated" id="qoderLogAt">尚无日志</span>
+          <button class="mini-btn" id="btnQoderLogClear" title="清空当前显示，不删除日志文件">清空显示</button>
+        </div>
+      </div>
+      <div class="log" id="qoderLog"></div>
+    </section>
+  </main>
+</div>
 
 <script src="app.js"></script>
 </body>

@@ -1,23 +1,31 @@
 """Windows 计划任务（脚本服务）管理。
 
-控制台把后台签到交给两个固定名称的计划任务：
+控制台把后台签到交给两个固定名称的 WorkBuddy 计划任务：
 
   WorkBuddyAutoSignin  每天 00:05，完整签到 + 成长中心
   WorkBuddyGrowthPoll  每天 01/05/09/13/17/21 点，补签 + 成长中心
 
-本模块只通过 PowerShell 的 ScheduledTasks 模块操作这两个任务；任务名、
+Qoder CN 使用另一个独立任务，互不影响：
+
+  QoderDailyCredits    每天 5 次（UTC+8 10:05 起），领取 100 Credits
+
+本模块只通过 PowerShell 的 ScheduledTasks 模块操作这些任务；任务名、
 触发器和动作全部来自下面的常量，前端不能传入任意命令。
 
-打包后计划任务直接运行控制台 exe 的 ``--service`` 模式（无窗口、无需系统
+WorkBuddy 打包后直接运行控制台 exe 的 ``--service`` 模式（无窗口、无需系统
 Python）；源码运行时运行 ``pythonw.exe app.py --service``。两种方式最终都
 调用 ``signin.py`` 的 ``_run()``，与手工执行 ``install-windows.ps1`` 等价。
+Qoder 任务则直接运行 ``pythonw.exe qoder_signin.py silent``，需要系统 Python。
 """
 
 import base64
+import datetime
+import glob
 import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 
 # 与 install-windows.ps1 / README 中的任务保持一致
@@ -42,8 +50,27 @@ TASKS = (
     },
 )
 
+# Qoder CN 是独立任务，和 WorkBuddy 的两个任务互不影响。
+# 触发点由 qoder_trigger_times() 按 UTC+8 10:00 刷新时间换算成本机时间。
+QODER_TASKS = (
+    {
+        "name": "QoderDailyCredits",
+        "label": "每日 Credits",
+        "when": "每天 5 次（UTC+8 10:05 起，按本机时间）",
+        "what": "查询并领取 Qoder CN 每日 100 Credits",
+        "action": "silent",
+        "minutes": 5,
+        "description": "Qoder CN daily 100 Credits claim (silent, zero token)",
+    },
+)
+
 TASK_BY_NAME = {item["name"]: item for item in TASKS}
 TASK_NAMES = tuple(TASK_BY_NAME)
+QODER_TASK_BY_NAME = {item["name"]: item for item in QODER_TASKS}
+QODER_TASK_NAMES = tuple(QODER_TASK_BY_NAME)
+
+# Qoder 活动按 UTC+8 每天 10:00 刷新；主触发点晚 5 分钟，另排 4 次补跑。
+QODER_OFFSETS = (0, 1, 5, 9, 13)
 
 # 轮询用 6 个独立的 Daily 触发器，而不是「Daily + 每 4 小时重复」。
 # 后者一旦错过（关机/睡眠）就永久跳过，StartWhenAvailable 不会补跑。
@@ -170,8 +197,8 @@ def _log_info(path):
     }
 
 
-def _status_script():
-    names = ",".join(_ps_quote(name) for name in TASK_NAMES)
+def _status_script(specs=TASKS):
+    names = ",".join(_ps_quote(item["name"]) for item in specs)
     return _PREAMBLE + r"""
 try {
     $tasks = @()
@@ -219,7 +246,7 @@ try {
 """ % names
 
 
-def _empty_tasks():
+def _empty_tasks(specs=TASKS):
     return [
         {
             "name": item["name"],
@@ -234,23 +261,24 @@ def _empty_tasks():
             "last_result": None,
             "action": "",
         }
-        for item in TASKS
+        for item in specs
     ]
 
 
-def _normalize_status(raw, log_path=None):
+def _normalize_status(raw, log_path=None, specs=TASKS):
     """把 PowerShell 的原始对象整理成前端直接可用的结构。"""
     if not isinstance(raw, dict):
         raise RuntimeError("PowerShell 返回无法解析")
     if not raw.get("ok"):
         raise RuntimeError(raw.get("error") or "读取计划任务状态失败")
 
+    spec_by_name = {item["name"]: item for item in specs}
     tasks = []
     for item in raw.get("tasks") or []:
         if not isinstance(item, dict):
             continue
         name = item.get("name")
-        spec = TASK_BY_NAME.get(name, {})
+        spec = spec_by_name.get(name, {})
         installed = bool(item.get("installed"))
         state = item.get("state") if installed else None
         enabled = bool(installed and state != "Disabled")
@@ -276,9 +304,9 @@ def _normalize_status(raw, log_path=None):
             "action": item.get("action") or "",
         })
 
-    # PowerShell 输出不完整时也保证两个任务都出现在界面上
+    # PowerShell 输出不完整时也保证清单里的任务都出现在界面上
     seen = {t["name"] for t in tasks}
-    for placeholder in _empty_tasks():
+    for placeholder in _empty_tasks(specs):
         if placeholder["name"] not in seen:
             tasks.append(placeholder)
 
@@ -292,9 +320,9 @@ def _normalize_status(raw, log_path=None):
         "supported": True,
         "ok": True,
         "tasks": tasks,
-        "installed": len(installed) == len(TASKS),
+        "installed": len(installed) == len(specs),
         "installed_count": len(installed),
-        "enabled": len(enabled) == len(TASKS),
+        "enabled": len(enabled) == len(specs),
         "running": bool(running),
         "next_run": next_runs[0] if next_runs else None,
         "last_run": last_runs[-1] if last_runs else None,
@@ -302,14 +330,14 @@ def _normalize_status(raw, log_path=None):
     }
 
 
-def status(log_path=None):
-    """读取两个计划任务的安装、启用、运行与最近执行信息。"""
+def status(log_path=None, specs=TASKS):
+    """读取计划任务的安装、启用、运行与最近执行信息。"""
     if not supported():
         return {
             "supported": False,
             "ok": False,
             "error": "计划任务管理仅支持 Windows",
-            "tasks": _empty_tasks(),
+            "tasks": _empty_tasks(specs),
             "installed": False,
             "installed_count": 0,
             "enabled": False,
@@ -319,14 +347,14 @@ def status(log_path=None):
             "log": None,
         }
     try:
-        raw = _parse_json(_run_ps(_status_script(), timeout=25))
-        return _normalize_status(raw, log_path)
+        raw = _parse_json(_run_ps(_status_script(specs), timeout=25))
+        return _normalize_status(raw, log_path, specs)
     except Exception as exc:
         return {
             "supported": True,
             "ok": False,
             "error": "%s: %s" % (type(exc).__name__, exc),
-            "tasks": _empty_tasks(),
+            "tasks": _empty_tasks(specs),
             "installed": False,
             "installed_count": 0,
             "enabled": False,
@@ -335,6 +363,11 @@ def status(log_path=None):
             "last_run": None,
             "log": _log_info(log_path),
         }
+
+
+def qoder_status(log_path=None):
+    """读取 QoderDailyCredits 任务的安装、启用、运行与最近执行信息。"""
+    return status(log_path, QODER_TASKS)
 
 
 def _install_script(runner, prefix_args, workdir):
@@ -426,7 +459,7 @@ def install(runner, prefix_args, workdir=None):
     }
 
 
-def _action_script(verb):
+def _action_script(verb, specs=TASKS):
     if verb not in ACTIONS:
         raise ValueError("未知计划任务操作：%s" % verb)
 
@@ -436,7 +469,7 @@ def _action_script(verb):
         "    $done = @()",
         "    $failed = @()",
         "    foreach ($n in @(%s)) {"
-        % ",".join(_ps_quote(name) for name in TASK_NAMES),
+        % ",".join(_ps_quote(item["name"]) for item in specs),
         "        $t = Get-ScheduledTask -TaskName $n -TaskPath '\\' "
         "-ErrorAction SilentlyContinue",
         "        if ($null -eq $t) { $failed += ($n + '：未安装'); continue }",
@@ -502,11 +535,11 @@ def _action_script(verb):
     return "\n".join(lines)
 
 
-def action(verb):
+def action(verb, specs=TASKS):
     """执行启用/停用/立即运行/停止/卸载；返回 ok、message 与明细。"""
     if not supported():
         raise RuntimeError("计划任务管理仅支持 Windows")
-    raw = _parse_json(_run_ps(_action_script(verb), timeout=40))
+    raw = _parse_json(_run_ps(_action_script(verb, specs), timeout=40))
     if not isinstance(raw, dict):
         raise RuntimeError("PowerShell 返回无法解析")
     return {
@@ -514,4 +547,123 @@ def action(verb):
         "message": raw.get("message") or raw.get("error") or "操作失败",
         "done": raw.get("done") or [],
         "failed": raw.get("failed") or [],
+    }
+
+
+def qoder_action(verb):
+    """只操作 QoderDailyCredits，不触碰 WorkBuddy 的两个任务。"""
+    return action(verb, QODER_TASKS)
+
+
+def qoder_trigger_times(now=None):
+    """把 UTC+8 每天 10:00 的刷新时间换算成本机 HH:mm 列表。
+
+    与 install-qoder-windows.ps1 保持一致：主触发点 +5 分钟，再按
+    0/1/5/9/13 小时排 4 次补跑。
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    reset = now.astimezone(datetime.timezone.utc).replace(
+        hour=2, minute=0, second=0, microsecond=0)
+    primary = reset.astimezone().replace(tzinfo=None) + datetime.timedelta(minutes=5)
+    return [(primary + datetime.timedelta(hours=h)).strftime("%H:%M")
+            for h in QODER_OFFSETS]
+
+
+def find_pythonw():
+    """定位 pythonw.exe，供 Qoder 计划任务使用。"""
+    exe = os.path.abspath(sys.executable)
+    name = os.path.basename(exe).lower()
+    if name in ("python.exe", "pythonw.exe"):
+        candidate = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if os.path.isfile(candidate):
+            return candidate
+
+    found = shutil.which("pythonw")
+    if found:
+        return found
+
+    roots = [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                     "Programs", "Python", "Python3*", "pythonw.exe"),
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "Python3*", "pythonw.exe"),
+        r"C:\Python3*\pythonw.exe",
+    ]
+    for pattern in roots:
+        matches = sorted(glob.glob(pattern), reverse=True)
+        if matches:
+            return matches[0]
+    return None
+
+
+def install_qoder(signin_path, pythonw=None, workdir=None):
+    """注册/修复 QoderDailyCredits，并回读确认。
+
+    刻意不复用 WorkBuddy 的 runner：Qoder 任务直接运行 ``pythonw qoder_signin.py
+    silent``，不依赖控制台 exe。任务名、触发器和动作全部在服务端固定。
+    """
+    if not supported():
+        raise RuntimeError("计划任务管理仅支持 Windows")
+    signin_path = os.path.abspath(signin_path)
+    if not os.path.isfile(signin_path):
+        raise RuntimeError("找不到 qoder_signin.py：%s" % signin_path)
+
+    pythonw = pythonw or find_pythonw()
+    if not pythonw or not os.path.isfile(pythonw):
+        raise RuntimeError("未找到 pythonw.exe，请先安装 Python 3")
+    if workdir is None:
+        workdir = os.path.dirname(signin_path)
+
+    times = qoder_trigger_times()
+    spec = QODER_TASKS[0]
+    lines = [
+        _PREAMBLE,
+        "try {",
+        "    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+        "    $principal = New-ScheduledTaskPrincipal -UserId $user "
+        "-LogonType Interactive -RunLevel Limited",
+        "    $exe = %s" % _ps_quote(pythonw),
+        "    $wd = %s" % _ps_quote(workdir),
+        "    $qargs = %s" % _ps_quote('"%s" silent' % signin_path),
+        "    $a = New-ScheduledTaskAction -Execute $exe -Argument $qargs "
+        "-WorkingDirectory $wd",
+        "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
+        "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
+        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
+        "    $triggers = @()",
+        "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
+        "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
+        "    }",
+        "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
+        "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
+        "-Description %s -Force | Out-Null"
+        % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
+        "    $t = Get-ScheduledTask -TaskName %s -TaskPath '\\' -ErrorAction Stop"
+        % _ps_quote(spec["name"]),
+        "    $i = Get-ScheduledTaskInfo -TaskName %s -TaskPath '\\' -ErrorAction Stop"
+        % _ps_quote(spec["name"]),
+        "    if ($null -eq $t -or $null -eq $i) { throw '任务回读失败' }",
+        "    [pscustomobject]@{",
+        "        ok = $true",
+        "        message = 'QoderDailyCredits 已安装并启用（每天 %s）'"
+        % " / ".join(times),
+        "        tasks = @([pscustomobject]@{",
+        "            name = $t.TaskName",
+        "            state = [string]$t.State",
+        "            next_run = if ($null -ne $i.NextRunTime -and $i.NextRunTime.Year -gt 2000) "
+        "{ $i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }",
+        "        })",
+        "    } | ConvertTo-Json -Depth 5 -Compress",
+        "} catch {",
+        "    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } | "
+        "ConvertTo-Json -Compress",
+        "}",
+    ]
+    raw = _parse_json(_run_ps("\n".join(lines), timeout=60))
+    if not isinstance(raw, dict):
+        raise RuntimeError("PowerShell 返回无法解析")
+    return {
+        "ok": bool(raw.get("ok")),
+        "message": raw.get("message") or raw.get("error") or "安装失败",
+        "tasks": raw.get("tasks") or [],
     }

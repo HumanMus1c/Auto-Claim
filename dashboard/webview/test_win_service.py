@@ -9,6 +9,7 @@
 真正的计划任务操作由 Windows 实机验证，避免测试修改用户系统状态。
 """
 
+import datetime
 import os
 import sys
 import unittest
@@ -101,6 +102,46 @@ class NormalizeStatusTest(unittest.TestCase):
     def test_error_is_raised(self):
         with self.assertRaises(RuntimeError):
             win_service._normalize_status({"ok": False, "error": "拒绝访问"})
+
+
+class QoderTaskTest(unittest.TestCase):
+
+    def test_qoder_task_is_independent(self):
+        self.assertEqual(win_service.QODER_TASK_NAMES, ("QoderDailyCredits",))
+        self.assertNotIn("QoderDailyCredits", win_service.TASK_NAMES)
+
+    def test_qoder_status_normalization(self):
+        raw = {
+            "ok": True,
+            "tasks": [
+                {"name": "QoderDailyCredits", "installed": True,
+                 "state": "Ready", "last_run": "2026-10-20 10:05:00",
+                 "next_run": "2026-10-20 23:05:00", "last_result": 0,
+                 "action": "pythonw qoder_signin.py silent"},
+            ],
+        }
+        status = win_service._normalize_status(
+            raw, specs=win_service.QODER_TASKS)
+
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["installed_count"], 1)
+        self.assertEqual(len(status["tasks"]), 1)
+        self.assertEqual(status["tasks"][0]["name"], "QoderDailyCredits")
+        self.assertEqual(status["tasks"][0]["label"], "每日 Credits")
+        self.assertEqual(status["next_run"], "2026-10-20 23:05:00")
+
+    def test_trigger_times_follow_utc8_refresh(self):
+        now = datetime.datetime(2026, 10, 20, 10, 0,
+                                tzinfo=datetime.timezone.utc)
+        times = win_service.qoder_trigger_times(now)
+        expected = [datetime.datetime(2026, 10, 20, 2, 5,
+                                      tzinfo=datetime.timezone.utc)
+                    + datetime.timedelta(hours=h)
+                    for h in win_service.QODER_OFFSETS]
+        self.assertEqual(times, [t.astimezone().strftime("%H:%M")
+                                 for t in expected])
+        self.assertEqual(len(times), 5)
 
 
 if __name__ == "__main__":

@@ -97,6 +97,47 @@ _REPO = os.path.dirname(SIGNIN)
 if os.path.isdir(_REPO) and _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
+QODER_SEARCHED = []
+
+
+def _locate_qoder():
+    """定位 qoder_signin.py，规则与 _locate_signin() 保持一致。
+
+    Qoder 是上游新增的独立脚本，和控制台 exe / signin.py 一样放在仓库根。
+    打包后优先找 exe 同级目录，源码运行则从 dashboard/webview 上溯。
+    """
+    override = (os.environ.get("WORKBUDDY_QODER_SIGNIN")
+                or os.environ.get("QODER_SIGNIN"))
+    if override:
+        return override
+
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+    roots.extend([HERE, os.getcwd()])
+
+    global QODER_SEARCHED
+    QODER_SEARCHED = []
+    seen = set()
+    for start in roots:
+        path = os.path.abspath(start)
+        for _ in range(6):
+            if path in seen:
+                break
+            seen.add(path)
+            candidate = os.path.join(path, "qoder_signin.py")
+            QODER_SEARCHED.append(candidate)
+            if os.path.isfile(candidate):
+                return candidate
+            parent = os.path.dirname(path)
+            if parent == path:
+                break
+            path = parent
+    return os.path.join(HERE, "qoder_signin.py")
+
+
+QODER = _locate_qoder()
+
 
 def _signin_log_path():
     """signin.py 的默认日志位置；环境变量优先，规则与 emit() 一致。"""
@@ -104,6 +145,14 @@ def _signin_log_path():
     if override:
         return override
     return os.path.join(os.path.dirname(os.path.abspath(SIGNIN)), "signin.log")
+
+
+def _qoder_log_path():
+    """qoder_signin.py 的默认日志位置；环境变量优先。"""
+    override = os.environ.get("QODER_SIGNIN_LOG")
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(QODER)), "qoder_signin.log")
 
 
 def _service_runner():
@@ -268,6 +317,77 @@ def _load_signin():
         return module
 
 
+# Qoder 同样按路径加载，避免与 exe 内可能存在的同名模块冲突。
+_QODER_MODULE = None
+_QODER_LOAD_LOCK = threading.Lock()
+_QODER_LOCK = threading.RLock()
+
+
+def _load_qoder():
+    """按路径加载 qoder_signin.py，且只加载一次。"""
+    global _QODER_MODULE
+    if _QODER_MODULE is not None:
+        return _QODER_MODULE
+
+    with _QODER_LOAD_LOCK:
+        if _QODER_MODULE is not None:
+            return _QODER_MODULE
+
+        import importlib.util
+
+        alias = "_workbuddy_qoder"
+        spec = importlib.util.spec_from_file_location(alias, QODER)
+        if spec is None or spec.loader is None:
+            raise ImportError("无法读取 %s" % QODER)
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[alias] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(alias, None)
+            raise
+
+        _QODER_MODULE = module
+        return module
+
+
+def _invoke_qoder(action, dry_run=False, once=False):
+    """在进程内运行 qoder_signin.py，并通过临时替换 emit() 捕获结果。
+
+    不用重定向 sys.stdout：控制台允许 WorkBuddy 与 Qoder 同时执行，全局
+    替换 stdout 会让两个线程互相截走输出。qoder_signin 只会通过 emit()
+    输出，临时换掉这个函数既能拿到 JSON，也不会影响其他线程。
+
+    ALREADY / INACTIVE 原本会走 quiet 分支不打印，这里也一并捕获，页面
+    才能显示“今日已领”而不是空白。
+    """
+    qoder = _load_qoder()
+    # 每次调用都重置模块的时间预算：_started_at 是模块加载时记下的，
+    # 控制台长期运行后再领取会误判“预算耗尽”。
+    qoder._started_at = time.monotonic()
+
+    captured = []
+    original_emit = qoder.emit
+
+    def capture(out, action, quiet=False):
+        text = json.dumps(out, ensure_ascii=False, default=str)
+        redact = getattr(qoder, "_redact", None)
+        captured.append(redact(text) if redact else text)
+
+    qoder.emit = capture
+    try:
+        code = qoder.run(action, dry_run=dry_run, once=once)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+    except Exception as exc:
+        code = 1
+        captured.append("异常：%s: %s" % (type(exc).__name__, exc))
+    finally:
+        qoder.emit = original_emit
+    return code, "\n".join(captured)
+
+
 def _diag_dir():
     """诊断与历史日志的落盘目录。
 
@@ -385,6 +505,39 @@ def _append_log(line):
         with open(_log_path(), "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
     except OSError:
+        pass
+
+
+def _qoder_log_snapshot(limit=12):
+    """读取 qoder_signin.log 末尾几行，供 Qoder 监控页展示。"""
+    path = _qoder_log_path()
+    try:
+        stat = os.stat(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [line.rstrip("\r\n") for line in fh]
+    except OSError:
+        return {"path": path, "at": None, "lines": []}
+    return {
+        "path": path,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+        "lines": [line for line in lines if line.strip()][-limit:],
+    }
+
+
+def _append_qoder_log(payload):
+    """把手动领取结果写进 Qoder 日志，刷新页面后仍能看到。
+
+    qoder_signin.py 在非静默模式下只把 JSON 打到 stdout，不写日志；
+    计划任务（silent）才会写。控制台不重定向 stdout，因此这里补一行。
+    """
+    if not isinstance(payload, dict):
+        return
+    try:
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        line = "[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text)
+        with open(_qoder_log_path(), "a", encoding="utf-8") as fh:
+            fh.write(line)
+    except (OSError, TypeError, ValueError):
         pass
 
 
@@ -750,6 +903,9 @@ class Api:
         self._watchdog = None
         self._lock = threading.Lock()
         self._busy = False
+        # Qoder 领取与 WorkBuddy 命令互不阻塞；各自维护忙碌状态。
+        self._qoder_busy = False
+        self._qoder_state_lock = threading.Lock()
         # 创建窗口之前探测到的主题，随 bootstrap 首批数据交给前端。
         self._initial_theme = dict(initial_theme or _system_theme())
 
@@ -784,6 +940,9 @@ class Api:
             "signin": SIGNIN,
             "signin_exists": os.path.exists(SIGNIN),
             "signin_searched": list(SEARCHED),
+            "qoder": QODER,
+            "qoder_exists": os.path.exists(QODER),
+            "qoder_searched": list(QODER_SEARCHED),
             "readonly": list(READONLY_ACTIONS),
             "actions": [
                 {"key": k, "label": v["label"], "write": v["write"],
@@ -1137,6 +1296,166 @@ class Api:
         result["status"] = self.service_status()
         text = result.get("message") or result.get("error") or "操作完成"
         _append_log("脚本服务 %s: %s" % (action, text))
+        return result
+
+    # ---------- Qoder CN 监控 ----------
+
+    @staticmethod
+    def _summarize_qoder(payload):
+        """把 qoder_signin.py 的 JSON 结果拍平成可读日志行。"""
+        if not isinstance(payload, dict):
+            return []
+        lines = []
+        for key, label in (
+            ("result", "结果"),
+            ("report", ""),
+            ("credits", "Credits"),
+            ("campaign", "活动"),
+            ("http", "HTTP"),
+            ("token_expires_at", "令牌到期"),
+        ):
+            value = payload.get(key)
+            if value is None or value == "":
+                continue
+            text = ("是" if value is True else "否") if isinstance(value, bool) \
+                else str(value)
+            lines.append(("  %-14s %s" % (label, text)).rstrip()
+                         if label else "  " + text)
+        return lines
+
+    def qoder_monitor(self):
+        """读取 Qoder CN 登录态、活动列表、设备组件与最近日志。
+
+        这个接口只读：status 查询活动，doctor 离线检查登录态，不会领取。
+        网络请求与 signin 的锁完全独立，不会阻塞 WorkBuddy 面板。
+        """
+        result = {"path": QODER, "log": _qoder_log_snapshot()}
+        if not os.path.isfile(QODER):
+            extra = dict(ok=False, error="未找到 qoder_signin.py",
+                         searched=list(QODER_SEARCHED))
+        elif self._qoder_busy:
+            extra = dict(ok=False, busy=True,
+                         error="Qoder 领取正在执行，请稍后再刷新")
+        else:
+            status = doctor = None
+            errors = []
+            with _QODER_LOCK:
+                try:
+                    _code, out = _invoke_qoder("status")
+                    status = self._parse_payload(out)
+                    if status is None:
+                        errors.append("status 未返回 JSON")
+                except Exception as exc:
+                    errors.append("status: %s: %s" % (type(exc).__name__, exc))
+
+                try:
+                    _code, out = _invoke_qoder("doctor")
+                    doctor = self._parse_payload(out)
+                    if doctor is None:
+                        errors.append("doctor 未返回 JSON")
+                except Exception as exc:
+                    errors.append("doctor: %s: %s" % (type(exc).__name__, exc))
+
+            extra = dict(
+                ok=bool(status or doctor),
+                healthy=bool(status and status.get("result") == "OK"),
+                status=status,
+                doctor=doctor,
+                at=time.strftime("%Y-%m-%d %H:%M:%S"),
+                errors=errors or None,
+            )
+        result.update(extra)
+        return result
+
+    def qoder_claim(self):
+        """异步领取 Qoder 今日 Credits，结果通过 qoder_done 事件推送。"""
+        if not os.path.isfile(QODER):
+            return {"ok": False, "error": "未找到 qoder_signin.py"}
+        with self._qoder_state_lock:
+            if self._qoder_busy:
+                return {"ok": False, "error": "Qoder 领取已经在执行"}
+            self._qoder_busy = True
+
+        threading.Thread(target=self._qoder_claim_worker, daemon=True).start()
+        _append_log("Qoder：开始领取今日 Credits")
+        return {"ok": True}
+
+    def _qoder_claim_worker(self):
+        event = {"exit": 2, "payload": None}
+        try:
+            self._push("qoder_log", "[%s] 开始领取 Qoder 今日 Credits"
+                       % time.strftime("%H:%M:%S"))
+            with _QODER_LOCK:
+                code, out = _invoke_qoder("auto")
+            payload = self._parse_payload(out)
+            _append_qoder_log(payload)
+            lines = self._summarize_qoder(payload)
+            if not lines:
+                lines = [line for line in out.splitlines() if line.strip()]
+            for line in lines:
+                self._push("qoder_log", line)
+                _append_log("Qoder " + line.strip())
+            event = {"exit": code, "payload": payload}
+        except Exception as exc:
+            detail = "%s: %s" % (type(exc).__name__, exc)
+            _append_qoder_log({"result": "ERROR", "report": detail})
+            self._push("qoder_log", "Qoder 领取异常：" + detail)
+            _append_log("Qoder 领取异常：" + detail)
+            event["error"] = detail
+        finally:
+            event["log"] = _qoder_log_snapshot()
+            event["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            # 先把忙碌标记放下，再推完成事件：前端收到事件后会立刻
+            # 调 qoder_monitor()，否则会被误判为「领取正在执行」。
+            with self._qoder_state_lock:
+                self._qoder_busy = False
+            self._push("qoder_done", event)
+
+    def qoder_service_status(self):
+        """读取 QoderDailyCredits 计划任务状态。"""
+        try:
+            import win_service
+            return win_service.qoder_status(_qoder_log_path())
+        except Exception as exc:
+            return {
+                "supported": os.name == "nt",
+                "ok": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "tasks": [],
+                "installed": False,
+                "installed_count": 0,
+                "enabled": False,
+                "running": False,
+                "next_run": None,
+                "last_run": None,
+                "log": None,
+            }
+
+    def qoder_service_action(self, action):
+        """安装/卸载/启用/停用/立即运行/停止 Qoder 计划任务。"""
+        allowed = ("install", "uninstall", "enable", "disable", "run", "stop")
+        if action not in allowed:
+            return {"ok": False, "error": "未知服务操作：%s" % action}
+
+        result = None
+        error = None
+        try:
+            import win_service
+            if action == "install":
+                if not os.path.isfile(QODER):
+                    error = "未找到 qoder_signin.py，无法安装计划任务"
+                else:
+                    result = win_service.install_qoder(QODER)
+            else:
+                result = win_service.qoder_action(action)
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, exc)
+
+        if result is None:
+            result = {"ok": False, "error": error}
+        result["status"] = self.qoder_service_status()
+        text = result.get("message") or result.get("error") or "操作完成"
+        _append_log("Qoder 计划任务 %s: %s" % (action, text))
         return result
 
     def system_theme(self):

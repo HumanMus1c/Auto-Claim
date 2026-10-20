@@ -23,6 +23,7 @@ BENIGN = {
     'self._push("log", line)', "_append_log(line)",
     # 双重检查锁的标准写法：锁外先看一次、锁内再看一次
     "if _SIGNIN_MODULE is not None:", "return _SIGNIN_MODULE",
+    "if _QODER_MODULE is not None:", "return _QODER_MODULE",
 }
 
 

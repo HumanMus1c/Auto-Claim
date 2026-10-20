@@ -105,5 +105,56 @@ class LocateSigninTest(unittest.TestCase):
         self.assertEqual(app._locate_signin(), sentinel)
 
 
+class LocateQoderTest(unittest.TestCase):
+    """qoder_signin.py 与 signin.py 共用同一套冻结/源码定位规则。"""
+
+    def setUp(self):
+        self._saved = {k: getattr(sys, k, None)
+                       for k in ("frozen", "_MEIPASS", "executable")}
+        self._saved_env = {
+            name: os.environ.pop(name, None)
+            for name in ("WORKBUDDY_QODER_SIGNIN", "QODER_SIGNIN")
+        }
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                if hasattr(sys, k):
+                    delattr(sys, k)
+            else:
+                setattr(sys, k, v)
+        for name, value in self._saved_env.items():
+            if value is not None:
+                os.environ[name] = value
+
+    def test_source_mode_finds_repo_qoder(self):
+        if hasattr(sys, "frozen"):
+            del sys.frozen
+        found = app._locate_qoder()
+        self.assertTrue(os.path.isfile(found),
+                        "源码模式应找到 qoder_signin.py，实际 %s" % found)
+        self.assertEqual(os.path.basename(found), "qoder_signin.py")
+
+    def test_frozen_searches_exe_directory_first(self):
+        sys.frozen = True
+        sys._MEIPASS = os.path.join(os.environ.get("TEMP", "/tmp"), "_MEI_FAKE")
+        sys.executable = os.path.join(REPO, "Auto-claim-dashboard.exe")
+
+        found = app._locate_qoder()
+
+        self.assertTrue(os.path.isfile(found))
+        self.assertEqual(os.path.dirname(os.path.abspath(found)),
+                         os.path.abspath(REPO))
+        self.assertEqual(app.QODER_SEARCHED[0],
+                         os.path.join(REPO, "qoder_signin.py"))
+
+    def test_env_override_wins(self):
+        sentinel = os.path.abspath(os.path.join(HERE, "nonexistent_qoder.py"))
+        os.environ["WORKBUDDY_QODER_SIGNIN"] = sentinel
+        if hasattr(sys, "frozen"):
+            del sys.frozen
+        self.assertEqual(app._locate_qoder(), sentinel)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

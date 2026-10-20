@@ -1,17 +1,19 @@
 # WorkBuddy 图形控制台
 
-> 给 `signin.py` 配一个本地图形界面：单文件 exe、无终端窗口、与脚本同级分发。
+> 给 `signin.py` 和 `qoder_signin.py` 配一个本地图形界面：单文件 exe、无终端窗口、与脚本同级分发。
 >
-> 代码位于 `dashboard/webview/`，产物 `Auto-claim-dashboard.exe` 落在仓库根目录（与 `signin.py` 并排）。
+> 代码位于 `dashboard/webview/`，产物 `Auto-claim-dashboard.exe` 落在仓库根目录（与两个签到脚本并排）。
 
 ## 目标与边界
 
 控制台只是**外壳**，不复制签到逻辑：
 
-- 所有网络请求、凭据解密、请求头构造都复用 `signin.py` 自己的函数，上游脚本一行未改。
-- 只调用 `signin.py` 已经存在的命令入口，不新增接口。
-- 界面只暴露非静默命令（`status` / `auto` / `growth` / `claim` / `all`）。`silent*` 系列只写日志文件、stdout 为空，对界面无意义，因此不出现。
+- WorkBuddy 的所有网络请求、凭据解密、请求头构造都复用 `signin.py` 自己的函数，上游脚本一行未改。
+- Qoder CN 通过路径加载 `qoder_signin.py`，同样不修改上游脚本；它只读取 Qoder 桌面端登录态，不接触 WorkBuddy 凭据。
+- 只调用两个脚本已经存在的命令入口，不新增接口。
+- WorkBuddy 界面只暴露非静默命令（`status` / `auto` / `growth` / `claim` / `all`）。`silent*` 系列只写日志文件、stdout 为空，对界面无意义，因此不出现。
 - `doctor` 保留后端能力但不设按钮：它对使用者没有可操作性，改为启动时自动跑一次，用于填充「凭据格式」卡片。
+- Qoder 的 `status` / `doctor` / `auto` 都在控制台内调用；`status` 与 `doctor` 是只读查询，`auto` 才真实领取。
 
 ## 技术选型
 
@@ -28,17 +30,29 @@
 
 ## 界面结构
 
-自上而下：
+左侧是固定侧边栏，顶部仍为全局顶栏：
 
-1. 顶栏 —— 环境信息（Python 版本、平台、`signin.py` 定位结果）+ 主题切换
-2. 4 张指标卡 —— 今日积分 / 连签天数 / 总积分 / 凭据格式
-3. 操作按钮 —— 写操作带二次确认，主按钮 hover 加深而非变白
-4. 脚本服务 —— 两个 Windows 计划任务的安装 / 启用 / 运行状态，以及安装、启停、立即运行、卸载操作
-5. 成长中心 —— 独立整行，上方是 Buddy 旅行 / 补登 / 连登兑换 / 抽奖 / Buddy 盲盒概览卡，下方是云端任务，按「未完成 / 已完成」分页签，带 `当前/目标` 进度；**始终完整展开，不设列表内滚动**（窗口放不下时整页滚动）
-6. 签到状态 + 当月日历 —— 同一行
-7. 日志 —— 整行收尾，按级别着色带图标，支持一键复制
+1. **侧边栏** —— 在「WorkBuddy」和「Qoder CN」两个监控页之间切换，记住上次选择（`localStorage` 的 `wbPage`）；Qoder 项带连接状态圆点
+2. 顶栏 —— 环境信息（Python 版本、平台、`signin.py` 定位结果）+ 主题切换
 
-除运行日志外，各面板标题栏右上角都提供「刷新」按钮：脚本服务重新读取计划任务状态，成长中心重新拉取概览与任务，签到状态 / 本月签到重新查询签到数据。
+WorkBuddy 页自上而下：
+
+1. 4 张指标卡 —— 今日积分 / 连签天数 / 总积分 / 凭据格式
+2. 操作按钮 —— 写操作带二次确认，主按钮 hover 加深而非变白
+3. 脚本服务 —— 两个 Windows 计划任务的安装 / 启用 / 运行状态，以及安装、启停、立即运行、卸载操作
+4. 成长中心 —— 独立整行，上方是 Buddy 旅行 / 补登 / 连登兑换 / 抽奖 / Buddy 盲盒概览卡，下方是云端任务，按「未完成 / 已完成」分页签，带 `当前/目标` 进度；**始终完整展开，不设列表内滚动**（窗口放不下时整页滚动）
+5. 签到状态 + 当月日历 —— 同一行
+6. 日志 —— 整行收尾，按级别着色带图标，支持一键复制
+
+Qoder CN 页自上而下：
+
+1. 4 张指标卡 —— 可领取 Credits / 本周期状态 / 登录态 / 计划任务
+2. 操作按钮 —— 「刷新监控」（只读）和「领取今日 Credits」（真实写操作，二次确认）
+3. Qoder 计划任务 —— `QoderDailyCredits` 的安装 / 启用 / 运行状态与操作，独立于 WorkBuddy 两个任务
+4. 活动与领取状态 + 登录态与设备 —— 同一行；左侧列出活动 key、Credits、领取状态和领取窗口，右侧显示账号目录、令牌来源 / 到期、设备标识与设备组件
+5. Qoder 日志 —— 读取 `qoder_signin.log` 末尾内容；手动领取结果也会补写进去
+
+除运行日志外，各面板标题栏右上角都提供「刷新」按钮。Qoder 页首次打开时才查询账号与活动，之后由手动刷新和计划任务状态轮询更新；WorkBuddy 页保持原有的启动即查询。
 
 外观细节：
 
@@ -60,8 +74,11 @@
 1. `bootstrap()` —— 返回环境信息与上次缓存结果（含 `growth.json` 快照），界面先用缓存填充卡片，避免开场一片「—」
 2. 自动执行 `status`，随后 `doctor`
 3. 后台静默拉取一次成长中心，不打断启动；`auto` / `growth` 执行完成后自动重拉一次
+4. Qoder 页不在启动时联网：只有第一次切换到该页、点击「刷新监控」或领取完成后，才调用 `qoder_monitor()`
 
 只有 `status` / `auto` / `claim` / `all` 完成后会更新顶部指标卡与签到详情；`growth` 的结果是另一套字段，只刷新成长中心，不会覆盖已有签到数据。失败或异常命令如果没有返回签到字段，也会保留上一次的显示值。
+
+Qoder 的 `qoder_monitor()` 依次执行 `status`（查询活动）与 `doctor`（离线检查登录态），返回 `status` / `doctor` / 日志快照；手动领取由 `qoder_claim()` 启动后台线程，执行完成后通过 `qoder_log` 和 `qoder_done` 事件推送结果。两条链路都不读写 WorkBuddy 的缓存或锁。
 
 成长中心走 `GET /v2/activity/growth/{tasks,buddy/travel/status,streak,heatmap,redeem/summary,lottery/chances,energy,buddy/quota}`，认证链路直接复用 `signin.py` 的 `find_auth_file` / `resolve_session` / `build_headers` / `get`，不另写一份 crypto。所有请求都是 GET；只有 `run('auto' / 'growth')` 会触发写操作。
 
@@ -81,6 +98,8 @@
 
 - 所有进入 `signin` 的路径共用一把模块级 `_SIGNIN_LOCK`。
 - `tasks()` / `growth()` 用**非阻塞**加锁：`auto` 可能跑几分钟，拿数据时干等会让界面像卡死，拿不到就快速返回「有命令正在执行」。
+
+Qoder 使用独立的 `_QODER_LOCK`，与 WorkBuddy 的 `_SIGNIN_LOCK` 互不等待。`qoder_signin.py` 也靠模块级 `_started_at` 记时间预算，所以每次调用前都会重置；它只用 `emit()` 输出，控制台在调用期间临时替换 `emit()` 来捕获 JSON，**不重定向 `sys.stdout`**——否则两个后台线程会互相截走输出。`ALREADY` / `INACTIVE` 原本会走 quiet 分支不打印，现在也一并捕获，页面能显示真实领取结果。
 
 ## 脚本服务（Windows 计划任务）
 
@@ -110,6 +129,21 @@
 
 > 若「安装 / 修复」报 `0x80070005`（拒绝访问），用登录 WorkBuddy 的同一账号以管理员身份启动控制台后再安装。提权只用于注册任务，任务本身仍以普通权限运行。
 
+### QoderDailyCredits（独立任务）
+
+Qoder 页的「Qoder 计划任务」只操作 `QoderDailyCredits` 一个任务，不会安装、启停或卸载 WorkBuddy 的两个任务。触发点与 `install-qoder-windows.ps1` 一致：按 UTC+8 每天 10:00 活动刷新，主触发点晚 5 分钟，另排 0/1/5/9/13 小时四次补跑，换算成本机时间后依次为 10:05、11:05、15:05、19:05、23:05（以 UTC+8 为例）。任务动作固定为：
+
+```text
+pythonw.exe <qoder_signin.py 的绝对路径> silent
+```
+
+- **安装 / 修复**：由 `win_service.install_qoder()` 直接注册任务，自动查找 `pythonw.exe`（当前解释器同目录、`PATH`、常见 Python 安装目录），注册后回读任务名和下次运行时间；需要二次确认。
+- **启用 / 停用 / 立即运行 / 停止 / 卸载**：与 WorkBuddy 任务共用同一套 PowerShell 操作封装，但任务清单只有 `QoderDailyCredits`。
+- **状态刷新**：任务运行中每 20 秒、空闲时每 180 秒读取一次状态，并显示 `qoder_signin.log` 最后一行。
+- **手动领取**：调用 `qoder_signin.py auto`，不依赖计划任务；结果同时写入 Qoder 页日志和 `qoder_signin.log`，刷新后仍可追溯。
+
+Qoder 任务依赖系统 Python；打包后的控制台 exe 不会被用作 Qoder 任务的运行器。若机器上没有 `pythonw.exe`，「安装 / 修复」会直接报错，而不会注册一个跑不起来的任务。
+
 ## 单实例与 UI 看门狗
 
 两者都在 `dashboard/win_guard.py`，只依赖 Win32 `ctypes`。
@@ -135,6 +169,8 @@
 ├── dumps\             卡死时抓的原生 minidump（hang-*.dmp，最多保留 3 份）
 └── trace.log          仅 WORKBUDDY_DEBUG=1 时产生，见下
 ```
+
+Qoder 是独立脚本，默认日志 `qoder_signin.log` 落在 `qoder_signin.py` 同目录（源码运行即仓库根目录），不在 `%LOCALAPPDATA%` 下；可用 `QODER_SIGNIN_LOG` 改到别处。打包后同样要求 `qoder_signin.py` 与 exe 并排，和 `signin.py` 的分发方式一致。
 
 ## 调试开关
 
@@ -162,6 +198,9 @@ $env:WORKBUDDY_DEBUG = "1"
 | 变量 | 作用 |
 |---|---|
 | `WORKBUDDY_DEMO_SIGNIN` | 直接指定 `signin.py` 路径，优先级最高，跳过所有自动搜索 |
+| `WORKBUDDY_QODER_SIGNIN` / `QODER_SIGNIN` | 直接指定 `qoder_signin.py` 路径，跳过自动搜索 |
+| `QODER_SIGNIN_LOG` | Qoder 日志路径，同时也是监控页读取的日志 |
+| `QODER_AUTH_DIR` / `QODER_TOKEN` / `QODER_BASE_URL` | 透传给 `qoder_signin.py`：登录态目录、直接提供令牌、覆盖 API 地址 |
 | `WORKBUDDY_DEBUG` | `1` 时启用上述追踪与探针 |
 | `WORKBUDDY_WATCHDOG` | `0` 时关闭 UI 看门狗（仅用于调试） |
 | `WORKBUDDY_HANG_DUMP` | `0` 时卡死不抓 minidump（只写线程栈） |

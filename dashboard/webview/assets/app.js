@@ -38,6 +38,43 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
+/* ---------- 侧边栏页面切换 ---------- */
+
+const PAGE_KEY = 'wbPage';
+let CURRENT_PAGE = 'workbuddy';
+let QODER_LOADED = false;
+let QODER_LOADING = false;
+
+function savedPage() {
+  try {
+    const saved = localStorage.getItem(PAGE_KEY);
+    if (saved === 'qoder') return 'qoder';
+  } catch (e) { /* 忽略 */ }
+  return 'workbuddy';
+}
+
+function setPage(page) {
+  CURRENT_PAGE = page === 'qoder' ? 'qoder' : 'workbuddy';
+  document.querySelectorAll('.side-tab').forEach((tab) => {
+    const active = tab.dataset.page === CURRENT_PAGE;
+    tab.classList.toggle('active', active);
+    tab.setAttribute('aria-current', active ? 'page' : 'false');
+  });
+  const wb = $('page-workbuddy');
+  const qoder = $('page-qoder');
+  if (wb) wb.hidden = CURRENT_PAGE !== 'workbuddy';
+  if (qoder) qoder.hidden = CURRENT_PAGE !== 'qoder';
+  try { localStorage.setItem(PAGE_KEY, CURRENT_PAGE); } catch (e) { /* 忽略 */ }
+  if (CURRENT_PAGE === 'qoder') ensureQoder();
+}
+
+function ensureQoder() {
+  if (QODER_LOADED || QODER_LOADING) return;
+  refreshQoder(false);
+  refreshQoderService(true);
+  scheduleQoderServicePoll();
+}
+
 /* ---------- 主题 ---------- */
 
 // 首屏配色已由 index.html 里的内联脚本在样式表之前完成，这里只负责
@@ -867,6 +904,12 @@ window.__onBackend = function (kind, data) {
     // 系统主题变化：只有「跟随系统」模式才改页面；手动选过亮/暗时保持不动。
     updateSystemTheme(!!data.dark);
 
+  } else if (kind === 'qoder_log') {
+    appendQoderLog(data);
+
+  } else if (kind === 'qoder_done') {
+    onQoderDone(data);
+
   } else if (kind === 'done') {
     const p = data.payload;
     if (data.action === 'doctor') {
@@ -1323,6 +1366,570 @@ function serviceAction(action) {
     });
 }
 
+/* ---------- Qoder CN 监控 ---------- */
+
+const QODER_RESULT_LABEL = {
+  OK: '已连接',
+  CLAIMED: '已领取',
+  ALREADY: '本周期已领取',
+  INACTIVE: '当前无活动',
+  PENDING: '活动未开放',
+  DRY_RUN: '仅预览',
+  NO_AUTH: '未登录',
+  AUTH_ERROR: '登录态异常',
+  AUTH_REJECTED: '需重新登录',
+  FORBIDDEN: '无资格',
+  NETWORK: '网络异常',
+  TIMEOUT: '请求超时',
+  ERROR: '查询失败',
+};
+
+const QODER_SVC_BUTTONS = {
+  install: 'btnQSvcInstall',
+  uninstall: 'btnQSvcUninstall',
+  enable: 'btnQSvcEnable',
+  disable: 'btnQSvcDisable',
+  run: 'btnQSvcRun',
+  stop: 'btnQSvcStop',
+};
+
+let QODER_DATA = null;
+let QODER_SERVICE = null;
+let QODER_BUSY = false;
+let QODER_PENDING = false;
+let QODER_SVC_BUSY = false;
+let QODER_SVC_PENDING = null;
+let QODER_SVC_REFRESHING = false;
+let QODER_SVC_TIMER = null;
+
+function qoderNum(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function qoderSum(list, key) {
+  let total = null;
+  list.forEach((item) => {
+    const n = qoderNum(item[key]);
+    if (n !== null) total = (total || 0) + n;
+  });
+  return total;
+}
+
+function qoderExpiry(value) {
+  if (!value) return '—';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function setQoderDd(index, value, title) {
+  const dds = $('qKv') ? $('qKv').querySelectorAll('dd') : [];
+  const dd = dds[index];
+  if (!dd) return;
+  dd.textContent = value == null || value === '' ? '—' : String(value);
+  dd.title = title || '';
+}
+
+function qoderSetDot(kind) {
+  const dot = $('qoderDot');
+  if (!dot) return;
+  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+}
+
+function renderQoderCards(status, doctor) {
+  const campaigns = (status && status.campaigns) || [];
+  const todo = campaigns.filter((c) => c.active && c.status === 'CLAIMABLE');
+  const claimed = campaigns.filter((c) => c.active && c.status === 'CLAIMED');
+  const todoCredits = qoderSum(todo, 'credits');
+  const claimedCredits = qoderSum(claimed, 'credits');
+  const keys = (list) => list.map((c) => c.campaign || '?').join('、');
+
+  let credits = null;
+  let creditsHint = '当前没有可领取活动';
+  if (todo.length) {
+    credits = todoCredits;
+    creditsHint = '本周期可领取 · ' + keys(todo);
+  } else if (claimed.length) {
+    credits = claimedCredits;
+    creditsHint = '本周期已领取 · ' + keys(claimed);
+  } else if (status && status.report) {
+    creditsHint = status.report;
+  }
+  setCard('qCredits', 'qCreditsHint', credits, creditsHint);
+
+  const result = status && status.result;
+  const stateText = result ? (QODER_RESULT_LABEL[result] || result) : '—';
+  let stateHint = (status && status.report) || '等待查询';
+  if (todo.length) stateHint = '可领取 ' + todo.length + ' 项';
+  else if (claimed.length) stateHint = '本周期已领取 ' + claimed.length + ' 项';
+  setCard('qState', 'qStateHint',
+    stateText === '已连接' && (todo.length || claimed.length)
+      ? (todo.length ? '可领取' : '已领取') : stateText,
+    stateHint);
+
+  let tokenText = '—';
+  let tokenHint = '等待体检';
+  if (doctor) {
+    if (doctor.result === 'OK') {
+      tokenText = doctor.token_expires_at ? '有效' : '可读取';
+      tokenHint = doctor.token_expires_at
+        ? '到期 ' + qoderExpiry(doctor.token_expires_at)
+        : (doctor.report || '桌面端登录态');
+    } else {
+      tokenText = QODER_RESULT_LABEL[doctor.result] || doctor.result || '异常';
+      tokenHint = doctor.report || '';
+    }
+  }
+  setCard('qToken', 'qTokenHint', tokenText, tokenHint);
+
+  setQoderDd(0, (doctor && doctor.auth_dir) || '—',
+    (doctor && doctor.auth_dir) || '');
+  setQoderDd(1, doctor && doctor.token_source === 'env'
+    ? '环境变量 QODER_TOKEN' : '桌面端登录态');
+  setQoderDd(2, doctor ? qoderExpiry(doctor.token_expires_at) : '—');
+  setQoderDd(3, doctor && doctor.device_identity ? '已获取' : '未获取');
+  setQoderDd(4, doctor && doctor.device_component
+    ? String(doctor.device_component).split(/[\\/]/).pop() : '未找到',
+    (doctor && doctor.device_component) || '');
+  setQoderDd(5, QODER_DATA && QODER_DATA.at ? QODER_DATA.at : '—');
+}
+
+function qoderCampaignTag(campaign) {
+  if (!campaign.active) return ['非活动期', 'locked'];
+  if (campaign.status === 'CLAIMABLE') return ['可领取', 'buddy'];
+  if (campaign.status === 'CLAIMED') return ['已领取', 'claimed'];
+  return [campaign.status || '未知', 'locked'];
+}
+
+function renderQoderCampaigns(status) {
+  const box = $('qCampaigns');
+  if (!box) return;
+  const campaigns = (status && status.campaigns) || [];
+  box.innerHTML = '';
+  if (!campaigns.length) {
+    box.innerHTML = '<p class="empty">当前没有活动记录（活动可能已结束，或登录态需要刷新）</p>';
+    return;
+  }
+
+  campaigns.forEach((c) => {
+    const el = document.createElement('div');
+    el.className = 'qcamp' + (c.status === 'CLAIMED' ? ' claimed' : '');
+
+    const top = document.createElement('div');
+    top.className = 'qcamp-top';
+
+    const key = document.createElement('span');
+    key.className = 'qcamp-key';
+    key.textContent = c.campaign || '?';
+
+    const reward = document.createElement('span');
+    reward.className = 'qcamp-reward';
+    reward.textContent = c.credits == null ? '—' : c.credits + ' Credits';
+
+    top.append(key, reward);
+    el.appendChild(top);
+
+    const tagRow = document.createElement('div');
+    tagRow.className = 'task-top';
+    const tagInfo = qoderCampaignTag(c);
+    const tag = document.createElement('span');
+    tag.className = 'tag ' + tagInfo[1];
+    tag.textContent = tagInfo[0];
+    tagRow.appendChild(tag);
+    el.appendChild(tagRow);
+
+    const meta = document.createElement('p');
+    meta.className = 'qcamp-meta';
+    const parts = [];
+    if (c.action) parts.push(c.action);
+    if (c.window) parts.push(c.window);
+    parts.push(c.active ? '活动进行中' : '不在领取窗口');
+    meta.textContent = parts.join(' · ');
+    el.appendChild(meta);
+
+    box.appendChild(el);
+  });
+}
+
+function appendQoderLog(text, kind) {
+  const box = $('qoderLog');
+  if (!box) return;
+  kind = kind || classify(text);
+  const spec = LOG_KINDS[kind] || LOG_KINDS.info;
+  const row = document.createElement('div');
+  row.className = 'line t-' + kind;
+
+  const ico = document.createElement('span');
+  ico.className = 'ico';
+  ico.textContent = spec.ico;
+
+  const txt = document.createElement('span');
+  txt.className = 'txt';
+  txt.textContent = text;
+
+  row.append(ico, txt);
+  box.appendChild(row);
+  while (box.childElementCount > 400) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderQoderLog(log) {
+  const box = $('qoderLog');
+  if (!box) return;
+  box.innerHTML = '';
+  const lines = (log && log.lines) || [];
+  lines.forEach((line) => appendQoderLog(line));
+  const at = $('qoderLogAt');
+  if (at) at.textContent = log && log.at ? '最近写入 ' + log.at : '尚无日志';
+}
+
+function qoderSideState(status, doctor, healthy) {
+  const hint = $('qoderSideHint');
+  if (!hint) return;
+  let text = '未检测';
+  let kind = '';
+  if (healthy) {
+    text = '已连接';
+    kind = 'ok';
+  } else if (doctor && doctor.result === 'NO_AUTH') {
+    text = '未登录';
+    kind = 'warn';
+  } else if (doctor && doctor.result === 'AUTH_REJECTED') {
+    text = '需重新登录';
+    kind = 'err';
+  } else if (status && status.result) {
+    text = QODER_RESULT_LABEL[status.result] || status.result;
+    kind = status.result === 'OK' ? 'ok' : 'warn';
+  }
+  hint.textContent = text;
+  qoderSetDot(kind);
+}
+
+function renderQoder(data) {
+  QODER_DATA = data || {};
+  const ok = QODER_DATA.ok !== false;
+  const status = QODER_DATA.status || null;
+  const doctor = QODER_DATA.doctor || null;
+
+  if (!ok) {
+    setCard('qCredits', 'qCreditsHint', '—', '无法读取');
+    setCard('qState', 'qStateHint', '不可用',
+      QODER_DATA.error || '请检查 qoder_signin.py 是否存在');
+    setCard('qToken', 'qTokenHint', '—', '—');
+    renderQoderCampaigns(null);
+    renderQoderLog(QODER_DATA.log);
+    const hint = $('qoderSideHint');
+    if (hint) hint.textContent = QODER_DATA.busy ? '领取中' : '不可用';
+    qoderSetDot(QODER_DATA.busy ? 'busy' : 'err');
+    if (!QODER_DATA.busy) {
+      appendQoderLog('Qoder 监控不可用：' + (QODER_DATA.error || '未知错误'), 'err');
+    }
+    return;
+  }
+
+  renderQoderCards(status, doctor);
+  renderQoderCampaigns(status);
+  renderQoderLog(QODER_DATA.log);
+  qoderSideState(status, doctor, !!QODER_DATA.healthy);
+  if (QODER_DATA.errors && QODER_DATA.errors.length) {
+    QODER_DATA.errors.forEach((line) => appendQoderLog(line, 'warn'));
+  }
+}
+
+function refreshQoder(silent) {
+  if (QODER_LOADING) return Promise.resolve();
+  QODER_LOADING = true;
+  const btn = $('btnQoderRefresh');
+  if (btn) btn.disabled = true;
+  if (!silent) appendQoderLog('正在读取 Qoder 账号、活动与日志…', 'meta');
+  return call('qoder_monitor')
+    .then((data) => {
+      QODER_LOADED = true;
+      renderQoder(data);
+    })
+    .catch((e) => {
+      QODER_LOADED = true;
+      renderQoder({ ok: false, error: String(e) });
+      appendQoderLog('刷新 Qoder 监控失败：' + e, 'err');
+    })
+    .finally(() => {
+      QODER_LOADING = false;
+      if (btn) btn.disabled = false;
+    });
+}
+
+function qoderResetClaim() {
+  if (!QODER_PENDING) return;
+  const btn = $('btnQoderClaim');
+  if (btn) {
+    btn.classList.remove('confirm');
+    btn.textContent = '领取今日 Credits';
+  }
+  QODER_PENDING = false;
+}
+
+function qoderClaim() {
+  if (QODER_BUSY) return;
+  const btn = $('btnQoderClaim');
+  if (!QODER_PENDING) {
+    QODER_PENDING = true;
+    if (btn) {
+      btn.classList.add('confirm');
+      btn.textContent = '确认领取？点此执行';
+    }
+    appendQoderLog('待确认：再次点击「确认领取」会真实调用 Qoder 领取接口', 'warn');
+    setTimeout(qoderResetClaim, 8000);
+    return;
+  }
+
+  qoderResetClaim();
+  QODER_BUSY = true;
+  if (btn) btn.disabled = true;
+  qoderSetDot('busy');
+  appendQoderLog('正在领取 Qoder 今日 Credits…', 'cmd');
+  call('qoder_claim')
+    .then((r) => {
+      if (r && !r.ok) {
+        QODER_BUSY = false;
+        if (btn) btn.disabled = false;
+        appendQoderLog('领取未启动：' + (r.error || '未知错误'), 'err');
+        refreshQoder(true);
+      }
+    })
+    .catch((e) => {
+      QODER_BUSY = false;
+      if (btn) btn.disabled = false;
+      appendQoderLog('领取调用失败：' + e, 'err');
+    });
+}
+
+function onQoderDone(data) {
+  QODER_BUSY = false;
+  const btn = $('btnQoderClaim');
+  if (btn) {
+    btn.disabled = false;
+    btn.textContent = '领取今日 Credits';
+    btn.classList.remove('confirm');
+  }
+  if (data && data.payload) {
+    const result = data.payload.result || '';
+    const report = data.payload.report || result;
+    appendQoderLog((QODER_RESULT_LABEL[result] || result || '完成') + '：' + report,
+      data.exit === 0 ? 'ok' : 'warn');
+  } else if (data && data.error) {
+    appendQoderLog('领取异常：' + data.error, 'err');
+  }
+  if (data && data.log) renderQoderLog(data.log);
+  refreshQoder(true);
+  refreshQoderService(true);
+}
+
+function renderQoderService(s) {
+  QODER_SERVICE = s || {};
+  const supported = QODER_SERVICE.supported !== false;
+  const ok = QODER_SERVICE.ok !== false;
+  const tasks = QODER_SERVICE.tasks || [];
+  const task = tasks[0] || {};
+
+  const pill = $('qsvcState');
+  let pillText = '未检测';
+  let pillKind = '';
+  if (!supported) {
+    pillText = '仅 Windows';
+    pillKind = 'warn';
+  } else if (!ok) {
+    pillText = '读取失败';
+    pillKind = 'err';
+  } else if (QODER_SERVICE.running) {
+    pillText = '运行中';
+    pillKind = 'busy';
+  } else if (QODER_SERVICE.installed && QODER_SERVICE.enabled) {
+    pillText = '已启用';
+    pillKind = 'ok';
+  } else if (QODER_SERVICE.installed) {
+    pillText = '已停用';
+    pillKind = 'warn';
+  } else {
+    pillText = '未安装';
+  }
+  pill.textContent = pillText;
+  pill.className = 'svc-pill ' + pillKind;
+
+  const summary = $('qsvcSummary');
+  if (!supported) {
+    summary.textContent = 'Qoder 计划任务使用 Windows 任务计划程序，当前平台不支持。';
+  } else if (!ok) {
+    summary.textContent = '状态读取失败：' + (QODER_SERVICE.error || '未知错误');
+  } else if (!QODER_SERVICE.installed) {
+    summary.textContent = '尚未安装 QoderDailyCredits。点击「安装 / 修复」创建独立任务；'
+      + '它不会改动 WorkBuddy 的两个任务。';
+  } else if (QODER_SERVICE.enabled) {
+    summary.textContent = 'QoderDailyCredits 已启用'
+      + (QODER_SERVICE.next_run ? '，下次运行 ' + QODER_SERVICE.next_run : '') + '。';
+  } else {
+    summary.textContent = 'QoderDailyCredits 已安装但被停用；点击「启用」恢复自动领取。';
+  }
+
+  const box = $('qsvcTasks');
+  box.innerHTML = '';
+  tasks.forEach((t) => box.appendChild(makeServiceNode(t)));
+
+  const log = $('qsvcLog');
+  if (QODER_SERVICE.log && QODER_SERVICE.log.line) {
+    log.textContent = '最近日志 ' + (QODER_SERVICE.log.at || '') + ' · '
+      + QODER_SERVICE.log.line;
+    log.title = (QODER_SERVICE.log.path || '') + '\n' + QODER_SERVICE.log.line;
+  } else {
+    log.textContent = '';
+    log.title = '';
+  }
+
+  let taskText = '—';
+  let taskHint = '未检测';
+  if (!supported) {
+    taskText = '仅 Windows';
+    taskHint = '计划任务管理不可用';
+  } else if (!ok) {
+    taskText = '读取失败';
+    taskHint = QODER_SERVICE.error || '';
+  } else if (!task.installed) {
+    taskText = '未安装';
+    taskHint = '点击「安装 / 修复」创建 QoderDailyCredits';
+  } else if (task.state === 'Running') {
+    taskText = '运行中';
+    taskHint = '上次 ' + (task.last_run || '尚未运行');
+  } else if (task.enabled) {
+    taskText = '已启用';
+    taskHint = task.next_run ? '下次 ' + task.next_run : '等待调度';
+  } else {
+    taskText = '已停用';
+    taskHint = '点击「启用」恢复自动领取';
+  }
+  setCard('qTask', 'qTaskHint', taskText, taskHint);
+
+  const installed = !!QODER_SERVICE.installed_count;
+  const anyEnabled = tasks.some((t) => t.installed && t.enabled);
+  const canUse = supported && ok && !QODER_SVC_BUSY;
+
+  $('btnQSvcInstall').disabled = !canUse;
+  $('btnQSvcEnable').disabled = !canUse || !installed || !!QODER_SERVICE.enabled;
+  $('btnQSvcDisable').disabled = !canUse || !installed || !anyEnabled;
+  $('btnQSvcRun').disabled = !canUse || !installed || !anyEnabled;
+  $('btnQSvcStop').disabled = !canUse || !QODER_SERVICE.running;
+  $('btnQSvcUninstall').disabled = !canUse || !installed;
+  $('btnQSvcRefresh').disabled = QODER_SVC_BUSY;
+}
+
+function setQoderServiceBusy(on) {
+  QODER_SVC_BUSY = on;
+  const pill = $('qsvcState');
+  if (on) {
+    pill.textContent = '处理中…';
+    pill.className = 'svc-pill busy';
+  }
+  Object.keys(QODER_SVC_BUTTONS).forEach((key) => {
+    if (on) $(QODER_SVC_BUTTONS[key]).disabled = true;
+  });
+  $('btnQSvcRefresh').disabled = on;
+  if (!on) renderQoderService(QODER_SERVICE || {});
+}
+
+function resetQoderSvcPending() {
+  if (!QODER_SVC_PENDING) return;
+  const btn = $(QODER_SVC_BUTTONS[QODER_SVC_PENDING]);
+  if (btn) {
+    btn.classList.remove('confirm');
+    if (btn.dataset.label) {
+      btn.textContent = btn.dataset.label;
+      delete btn.dataset.label;
+    }
+  }
+  QODER_SVC_PENDING = null;
+}
+
+function qoderLabel(action) {
+  return {
+    install: '安装 / 修复',
+    uninstall: '卸载',
+    enable: '启用',
+    disable: '停用',
+    run: '立即运行',
+    stop: '停止',
+  }[action] || action;
+}
+
+function qoderServiceAction(action) {
+  if (QODER_SVC_BUSY) return;
+  const btn = $(QODER_SVC_BUTTONS[action]);
+  const label = qoderLabel(action);
+
+  if ((action === 'install' || action === 'uninstall')
+      && QODER_SVC_PENDING !== action) {
+    resetQoderSvcPending();
+    QODER_SVC_PENDING = action;
+    btn.dataset.label = btn.textContent;
+    btn.classList.add('confirm');
+    btn.textContent = '确认' + label + '？';
+    appendQoderLog('待确认：' + label + ' Qoder 计划任务（再次点击按钮执行）', 'warn');
+    setTimeout(() => { if (QODER_SVC_PENDING) resetQoderSvcPending(); }, 8000);
+    return;
+  }
+
+  resetQoderSvcPending();
+  setQoderServiceBusy(true);
+  appendQoderLog('Qoder 计划任务：' + label + '…', 'cmd');
+  call('qoder_service_action', action)
+    .then((r) => {
+      if (r && r.ok) {
+        appendQoderLog('Qoder 计划任务：' + (r.message || (label + '完成')), 'ok');
+      } else {
+        appendQoderLog('Qoder 计划任务：'
+          + ((r && (r.error || r.message)) || '操作失败'), 'err');
+      }
+      if (r && r.status) renderQoderService(r.status);
+      else return refreshQoderService(true);
+    })
+    .catch((e) => appendQoderLog('Qoder 计划任务调用失败：' + e, 'err'))
+    .finally(() => {
+      QODER_SVC_BUSY = false;
+      refreshQoderService(true).finally(() => setQoderServiceBusy(false));
+    });
+}
+
+function refreshQoderService(silent) {
+  if (QODER_SVC_BUSY || QODER_SVC_REFRESHING) return Promise.resolve();
+  QODER_SVC_REFRESHING = true;
+  const btn = $('btnQSvcRefresh');
+  if (btn) btn.disabled = true;
+  return call('qoder_service_status')
+    .then((s) => {
+      renderQoderService(s);
+      if (!silent && s && s.ok === false) {
+        appendQoderLog('读取 Qoder 计划任务失败：' + (s.error || '未知错误'), 'err');
+      }
+    })
+    .catch((e) => {
+      renderQoderService({ supported: true, ok: false, error: String(e), tasks: [] });
+      appendQoderLog('读取 Qoder 计划任务异常：' + e, 'err');
+    })
+    .finally(() => {
+      QODER_SVC_REFRESHING = false;
+      if (btn) btn.disabled = QODER_SVC_BUSY;
+    });
+}
+
+function scheduleQoderServicePoll() {
+  if (QODER_SVC_TIMER) clearTimeout(QODER_SVC_TIMER);
+  const delay = (QODER_SERVICE && QODER_SERVICE.running) ? 20000 : 180000;
+  QODER_SVC_TIMER = setTimeout(() => {
+    if (document.hidden || CURRENT_PAGE !== 'qoder') {
+      scheduleQoderServicePoll();
+      return;
+    }
+    refreshQoderService(true).finally(scheduleQoderServicePoll);
+  }, delay);
+}
+
 /* ---------- 存活心跳 ---------- */
 
 // 每 5 秒一次，等上一次 Promise 落地后才排下一次。UI 线程或 WebView2
@@ -1399,6 +2006,14 @@ async function boot(api) {
   refreshService(true);
   scheduleServicePoll();
 
+  setPage(savedPage());
+  if (!info.qoder_exists) {
+    const hint = $('qoderSideHint');
+    if (hint) hint.textContent = '缺少 qoder_signin.py';
+    qoderSetDot('err');
+    appendLog('未找到 qoder_signin.py，Qoder 监控页不可用。', 'warn');
+  }
+
   // 启动即刷新：缓存只是"先有个数看"，真实数据以这次查询为准。
   // doctor 只跑后端、不暴露按钮，用来填充「凭据格式」那张卡。
   if (info.signin_exists) {
@@ -1448,6 +2063,21 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btnSvcRefresh').addEventListener('click', () => refreshService(false));
   Object.keys(SVC_BUTTONS).forEach((action) => {
     $(SVC_BUTTONS[action]).addEventListener('click', () => serviceAction(action));
+  });
+
+  document.querySelectorAll('.side-tab').forEach((tab) => {
+    tab.addEventListener('click', () => setPage(tab.dataset.page));
+  });
+
+  $('btnQoderRefresh').addEventListener('click', () => refreshQoder(false));
+  $('btnQoderClaim').addEventListener('click', qoderClaim);
+  $('btnQoderLogClear').addEventListener('click', () => {
+    $('qoderLog').innerHTML = '';
+    $('qoderLogAt').textContent = '显示已清空';
+  });
+  $('btnQSvcRefresh').addEventListener('click', () => refreshQoderService(false));
+  Object.keys(QODER_SVC_BUTTONS).forEach((action) => {
+    $(QODER_SVC_BUTTONS[action]).addEventListener('click', () => qoderServiceAction(action));
   });
 
   $('taskTabs').addEventListener('click', (e) => {
