@@ -273,6 +273,8 @@ def _probe(window):
           "credType:(document.getElementById('vCred')||{}).textContent||'',"
           "todo:(document.getElementById('cntTodo')||{}).textContent||'',"
           "done:(document.getElementById('cntDone')||{}).textContent||'',"
+          "growth:(document.getElementById('growthUpdated')||{}).textContent||'',"
+          "growthCards:(document.getElementById('growthOverview')||{}).childElementCount||0,"
           "svc:(document.getElementById('svcState')||{}).textContent||'',"
           "svcInstalled:(document.getElementById('svcSummary')||{}).textContent||'',"
           "tasks:(document.getElementById('tasklist')||{}).childElementCount||0,"
@@ -331,15 +333,383 @@ def _append_log(line):
         pass
 
 
+# 成长中心状态文案：后端写“数据变化”日志时使用。
+_TASK_STATUS_TEXT = {
+    "not_accepted": "待接单",
+    "accepted": "进行中",
+    "in_progress": "进行中",
+    "completed": "可领奖",
+    "claimed": "已领取",
+    "unknown": "未知",
+}
+_TRAVEL_STATE_TEXT = {
+    "idle": "待命",
+    "traveling": "旅行中",
+    "arrived": "已到达",
+    "unknown": "未知",
+}
+_REDEEM_STATUS_TEXT = {
+    "available": "可兑换",
+    "claimed": "已兑换",
+    "locked": "未解锁",
+    "unknown": "未知",
+}
+
+
+class _GrowthAuthError(Exception):
+    """成长中心只读接口明确返回 401/403。"""
+
+
+def _growth_store_path():
+    """成长中心上次只读快照，用于比较数据变化。"""
+    return os.path.join(_diag_dir(), "growth.json")
+
+
+def _load_growth_store():
+    try:
+        with open(_growth_store_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_growth_store(data):
+    try:
+        with open(_growth_store_path(), "w", encoding="utf-8") as fh:
+            json.dump(data, fh, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def _task_index(tasks):
+    result = {}
+    for task in tasks or []:
+        if isinstance(task, dict) and task.get("code"):
+            result[str(task["code"])] = task
+    return result
+
+
+def _tier_index(tiers):
+    result = {}
+    for tier in tiers or []:
+        if isinstance(tier, dict) and tier.get("tier"):
+            result[tier["tier"]] = tier
+    return result
+
+
+def _fmt_num(value):
+    return "—" if value is None else str(value)
+
+
+def _fmt_progress(task):
+    current = task.get("current")
+    target = task.get("target")
+    if current is None or target is None:
+        return ""
+    return "%s / %s" % (current, target)
+
+
+def _growth_changes(prev_data, new_data):
+    """把两次成长中心快照的差异转成人话，供运行日志逐条记录。
+
+    只比较会影响用户判断的字段：任务状态/进度、Buddy 旅行、补登卡与可补
+    日期、连登兑换、抽奖机会、能量、Buddy 盲盒是否可开。首次没有基线时
+    返回空列表，避免把整份任务清单误报成“新增”。
+    """
+    if not isinstance(prev_data, dict) or not prev_data:
+        return []
+    if not isinstance(new_data, dict) or not new_data:
+        return []
+
+    changes = []
+
+    old_tasks = _task_index(prev_data.get("tasks"))
+    new_tasks = _task_index(new_data.get("tasks"))
+    for code in sorted(set(old_tasks) | set(new_tasks)):
+        old_task = old_tasks.get(code)
+        new_task = new_tasks.get(code)
+        title = (new_task or old_task or {}).get("title") or code
+        if old_task is None:
+            status = _TASK_STATUS_TEXT.get((new_task or {}).get("status"), "未知")
+            changes.append("新增任务「%s」（%s）" % (title, status))
+            continue
+        if new_task is None:
+            changes.append("任务「%s」已从列表移除" % title)
+            continue
+
+        bits = []
+        old_status = _TASK_STATUS_TEXT.get(old_task.get("status"), "未知")
+        new_status = _TASK_STATUS_TEXT.get(new_task.get("status"), "未知")
+        if old_status != new_status:
+            bits.append("%s → %s" % (old_status, new_status))
+        old_progress = _fmt_progress(old_task)
+        new_progress = _fmt_progress(new_task)
+        if old_progress and new_progress and old_progress != new_progress:
+            bits.append("进度 %s → %s" % (old_progress, new_progress))
+        if bits:
+            changes.append("任务「%s」：%s" % (title, "；".join(bits)))
+
+    old_travel = prev_data.get("travel") or {}
+    new_travel = new_data.get("travel") or {}
+    old_state = old_travel.get("state")
+    new_state = new_travel.get("state")
+    if old_state != new_state:
+        tail = ""
+        if new_state == "traveling" and new_travel.get("location"):
+            tail = "（%s）" % new_travel["location"]
+        changes.append("Buddy 旅行：%s → %s%s" % (
+            _TRAVEL_STATE_TEXT.get(old_state, old_state or "未知"),
+            _TRAVEL_STATE_TEXT.get(new_state, new_state or "未知"), tail))
+    elif new_state == "traveling" and old_travel.get("location") != new_travel.get("location"):
+        changes.append("Buddy 旅行地点：%s → %s" % (
+            old_travel.get("location") or "—", new_travel.get("location") or "—"))
+    if old_travel.get("daily_limit_reached") != new_travel.get("daily_limit_reached"):
+        changes.append("今日旅行名额：%s → %s" % (
+            "已用完" if old_travel.get("daily_limit_reached") else "可用",
+            "已用完" if new_travel.get("daily_limit_reached") else "可用"))
+
+    old_streak = prev_data.get("streak") or {}
+    new_streak = new_data.get("streak") or {}
+    old_days = old_streak.get("days")
+    new_days = new_streak.get("days")
+    if old_days != new_days:
+        changes.append("连签天数：%s → %s 天" % (_fmt_num(old_days), _fmt_num(new_days)))
+    old_cards = (old_streak.get("makeup_cards") or {}).get("balance")
+    new_cards = (new_streak.get("makeup_cards") or {}).get("balance")
+    if old_cards != new_cards:
+        changes.append("补登卡：%s → %s 张" % (_fmt_num(old_cards), _fmt_num(new_cards)))
+    old_dates = old_streak.get("makeup_candidates")
+    new_dates = new_streak.get("makeup_candidates")
+    if isinstance(old_dates, list) and isinstance(new_dates, list) and old_dates != new_dates:
+        extra = "（最近 %s）" % new_dates[0] if new_dates else ""
+        changes.append("可补断签：%s → %s 天%s" % (len(old_dates), len(new_dates), extra))
+
+    old_redeem = _tier_index((prev_data.get("redeem") or {}).get("tiers"))
+    new_redeem = _tier_index((new_data.get("redeem") or {}).get("tiers"))
+    for tier in ("7d", "14d", "28d"):
+        old_tier = old_redeem.get(tier) or {}
+        new_tier = new_redeem.get(tier) or {}
+        old_text = _REDEEM_STATUS_TEXT.get(old_tier.get("status"),
+                                          old_tier.get("status") or "未知")
+        new_text = _REDEEM_STATUS_TEXT.get(new_tier.get("status"),
+                                           new_tier.get("status") or "未知")
+        if old_text != new_text:
+            label = new_tier.get("label") or old_tier.get("label") or tier
+            changes.append("连登兑换 %s：%s → %s" % (label, old_text, new_text))
+
+    old_lottery = (prev_data.get("lottery") or {}).get("balance")
+    new_lottery = (new_data.get("lottery") or {}).get("balance")
+    if old_lottery != new_lottery:
+        changes.append("抽奖机会：%s → %s 次" % (_fmt_num(old_lottery), _fmt_num(new_lottery)))
+
+    old_energy = (prev_data.get("energy") or {}).get("balance")
+    new_energy = (new_data.get("energy") or {}).get("balance")
+    if old_energy != new_energy:
+        changes.append("能量：%s → %s" % (_fmt_num(old_energy), _fmt_num(new_energy)))
+
+    old_buddy = prev_data.get("buddy") or {}
+    new_buddy = new_data.get("buddy") or {}
+    old_affordable = old_buddy.get("affordable")
+    new_affordable = new_buddy.get("affordable")
+    if old_affordable != new_affordable:
+        changes.append("Buddy 盲盒可开：%s → %s 次" % (
+            _fmt_num(old_affordable), _fmt_num(new_affordable)))
+    old_cost = old_buddy.get("cost_per_open")
+    new_cost = new_buddy.get("cost_per_open")
+    if old_cost != new_cost:
+        changes.append("Buddy 盲盒单价：%s → %s 能量" % (_fmt_num(old_cost), _fmt_num(new_cost)))
+
+    return changes
+
+
+def _growth_snapshot(signin, endpoint, headers):
+    """读取成长中心全部只读数据，返回 (data, errors)。
+
+    单个接口失败不影响其他区块；401/403 直接抛 _GrowthAuthError，由调用方
+    统一转成认证错误。这里只有 GET，不会改动任何服务端状态。
+    """
+    base = endpoint + "/v2/activity/growth"
+    errors = []
+
+    def fetch(path):
+        code, body = signin.get(base + path, headers)
+        if code in (401, 403):
+            raise _GrowthAuthError("HTTP %s" % code)
+        if not signin._api_success(code, body):
+            message = ""
+            if isinstance(body, dict):
+                message = text(body.get("msg") or body.get("message") or "")
+            errors.append("%s（HTTP %s%s）" % (
+                path, code, ("：" + message[:80]) if message else ""))
+            return None
+        return body
+
+    def mapping(value):
+        return value if isinstance(value, dict) else {}
+
+    def text(value):
+        return value if isinstance(value, str) else ("" if value is None else str(value))
+
+    def optional_num(value):
+        return None if value is None else signin.as_int(value)
+
+    tasks_body = mapping(fetch("/tasks"))
+    raw_tasks = signin.dig(tasks_body, "tasks") or []
+    if not isinstance(raw_tasks, list):
+        raw_tasks = []
+    tasks = []
+    for item in raw_tasks:
+        if not isinstance(item, dict):
+            continue
+        progress = mapping(item.get("progress"))
+        task = {
+            "code": text(item.get("task_code")),
+            "title": text(item.get("title")) or text(item.get("task_code")) or "未命名任务",
+            "desc": text(item.get("task_desc")) or text(item.get("description")),
+            "status": text(item.get("accept_status")) or "unknown",
+            "locked": bool(item.get("locked")),
+            "credit": optional_num(item.get("reward_credit")) or 0,
+            "energy": optional_num(item.get("reward_energy")) or 0,
+            "buddy": bool(item.get("reward_buddy")),
+            "current": optional_num(progress.get("current")),
+            "target": optional_num(progress.get("target")),
+            "badge": text(item.get("badge_name")),
+            "new": bool(item.get("is_new")),
+        }
+        tasks.append(task)
+
+    travel_body = mapping(fetch("/buddy/travel/status"))
+    location = signin.dig(travel_body, "location")
+    travel = {
+        "state": text(signin.dig(travel_body, "state")) or "unknown",
+        "location": text(location.get("name")) if isinstance(location, dict) else None,
+        "arrive_at": optional_num(signin.dig(travel_body, "arrive_at")),
+        "server_now": optional_num(signin.dig(travel_body, "server_now")),
+        "daily_limit_reached": bool(signin.dig(travel_body, "daily_limit_reached")),
+        "duration_hours": optional_num(signin.dig(travel_body, "duration_hours")),
+        "reward_credit": optional_num(signin.dig(travel_body, "reward_credit")) or 0,
+    }
+
+    streak_body = mapping(fetch("/streak"))
+    streak_obj = signin.dig(streak_body, "streak")
+    if not isinstance(streak_obj, dict):
+        streak_obj = {}
+    cards_obj = signin.dig(streak_body, "makeup_cards")
+    card_max = 4
+    if isinstance(cards_obj, dict):
+        card_balance = optional_num(cards_obj.get("balance"))
+        card_max = optional_num(cards_obj.get("max")) or card_max
+    elif cards_obj is not None:
+        card_balance = optional_num(cards_obj)
+    else:
+        card_balance = None
+    streak = {
+        "days": optional_num(streak_obj.get("days")),
+        "next_tier": text(streak_obj.get("next_tier")),
+        "next_tier_remaining": optional_num(streak_obj.get("next_tier_remaining")),
+        "month_total_days": optional_num(streak_obj.get("month_total_days")),
+        "makeup_cards": {"balance": card_balance, "max": card_max},
+        "makeup_candidates": [],
+        "makeup_checked": False,
+        "makeup_error": None,
+    }
+    if card_balance and card_balance > 0:
+        heatmap_body = mapping(fetch("/heatmap"))
+        if heatmap_body:
+            try:
+                streak["makeup_candidates"] = signin._makeup_candidates(streak_body, heatmap_body)
+            except Exception as exc:
+                streak["makeup_error"] = "%s: %s" % (type(exc).__name__, exc)
+                errors.append("补登日历：%s" % streak["makeup_error"])
+            else:
+                streak["makeup_checked"] = True
+        else:
+            streak["makeup_error"] = "活跃日历读取失败"
+
+    redeem_body = mapping(fetch("/redeem/summary"))
+    redemption = signin.dig(streak_body, "redemption_status")
+    if not isinstance(redemption, dict):
+        redemption = {}
+    tier_rewards = {}
+    for entry in redemption.get("tiers") or []:
+        if isinstance(entry, dict) and entry.get("tier"):
+            tier_rewards[entry["tier"]] = entry
+    tiers = []
+    for tier, status_key, label, days in signin._REDEEM_TIERS:
+        entry = tier_rewards.get(tier) or {}
+        status = text(signin.dig(redeem_body, status_key + "_status"))
+        if not status:
+            status = text(signin.dig(redemption, "tier_%s_status" % tier))
+        tier_item = {
+            "tier": tier,
+            "label": "%s 天" % days,
+            "status": status or "unknown",
+            "credit": optional_num(entry.get("credit")) or 0,
+            "energy": optional_num(entry.get("energy")) or 0,
+            "cards": optional_num(entry.get("cards")) or 0,
+            "chances": optional_num(entry.get("chances")) or 0,
+            "count": optional_num(signin.dig(redeem_body, status_key + "_count")) or 0,
+        }
+        tiers.append(tier_item)
+
+    lottery_body = mapping(fetch("/lottery/chances"))
+    lottery = {"balance": optional_num(signin.dig(lottery_body, "balance"))}
+
+    energy_body = mapping(fetch("/energy"))
+    energy = {
+        "balance": optional_num(signin.dig(energy_body, "balance")),
+        "total_earned": optional_num(signin.dig(energy_body, "total_earned")),
+        "total_consumed": optional_num(signin.dig(energy_body, "total_consumed")),
+    }
+
+    quota_body = mapping(fetch("/buddy/quota"))
+    buddy = {
+        "energy": optional_num(signin.dig(quota_body, "balance")),
+        "affordable": optional_num(signin.dig(quota_body, "affordable")),
+        "cost_per_open": optional_num(signin.dig(quota_body, "cost_per_open")),
+        "max_open_count": optional_num(signin.dig(quota_body, "max_open_count")),
+    }
+
+    data = {
+        "tasks": tasks,
+        "travel": travel,
+        "streak": streak,
+        "redeem": {
+            "tiers": tiers,
+            "remaining_days": optional_num(signin.dig(redeem_body, "remaining_days")),
+        },
+        "lottery": lottery,
+        "energy": energy,
+        "buddy": buddy,
+        "errors": errors,
+    }
+    return data
+
+
 class Api:
     """暴露给 JS 的接口集合。"""
 
     def __init__(self):
         self._window = None
+        self._watchdog = None
         self._lock = threading.Lock()
         self._busy = False
 
     # ---------- 生命周期 ----------
+
+    def heartbeat(self):
+        """前端每 5 秒调用一次，作为整条 UI 链路的存活信号。
+
+        这个调用要依次经过 WebMessageReceived（UI 线程）和 evaluate_js
+        （UI 线程）才能把 Promise 还给 JS；UI 线程一旦卡住，下一次心跳
+        就不会到达，看门狗据此判定界面已死。返回体保持极简，避免心跳
+        本身成为负担。
+        """
+        watchdog = self._watchdog
+        if watchdog is not None:
+            watchdog.beat()
+        return {"ok": True}
 
     def bootstrap(self):
         """界面加载完成后调用：环境信息 + 上次查询的缓存结果。
@@ -363,6 +733,7 @@ class Api:
             ],
             "history": _read_local_log(),
             "cached": _load_store(),
+            "growth": _load_growth_store(),
         }
 
     def attach(self, window_id):
@@ -600,6 +971,63 @@ class Api:
         finally:
             _SIGNIN_LOCK.release()
 
+    def growth(self):
+        """读取成长中心全部数据，并把与上次快照的差异写进运行日志。
+
+        与 tasks() 一样复用 signin.py 的认证链路，但多拉了 Buddy 旅行、
+        补登、连登兑换、抽奖、能量和 Buddy 盲盒。所有请求都是 GET；写操作
+        仍只由 run('auto' / 'growth') 触发。
+        """
+        try:
+            signin = _load_signin()
+        except Exception as exc:
+            return {"ok": False, "error": "无法加载 signin.py：%s" % exc}
+
+        if not _SIGNIN_LOCK.acquire(blocking=False):
+            return {"ok": False, "error": "有命令正在执行，稍后再刷新成长中心"}
+        try:
+            auth_file, _ = signin.find_auth_file()
+            if not auth_file or not os.path.exists(auth_file):
+                return {"ok": False, "error": "未找到登录凭据"}
+            try:
+                session = signin.resolve_session(signin.load_session_retry(auth_file))
+                headers = signin.build_headers(session)
+            except Exception as exc:
+                return {"ok": False,
+                        "error": "读取登录凭据失败：%s: %s" % (type(exc).__name__, exc)}
+
+            endpoint = ((session.get("auth") or {}).get("endpoint")
+                        or signin.DEFAULT_ENDPOINT).rstrip("/")
+            # 仪表盘刷新是一组独立请求，别继承上一次命令残留的时间预算。
+            signin._start_budget()
+            data = _growth_snapshot(signin, endpoint, headers)
+            at = time.strftime("%Y-%m-%d %H:%M:%S")
+
+            previous = _load_growth_store()
+            previous_data = previous.get("data")
+            changes = []
+            baseline = not (isinstance(previous_data, dict) and previous_data)
+            if not data.get("errors"):
+                if not baseline:
+                    changes = _growth_changes(previous_data, data)
+                _save_growth_store({"at": at, "data": data})
+
+            stamp = time.strftime("%H:%M:%S")
+            for line in changes:
+                _append_log("[%s] 成长中心变化: %s" % (stamp, line))
+
+            _trace("growth: 任务 %d 项，变化 %d 条"
+                   % (len(data.get("tasks") or []), len(changes)))
+            return {"ok": True, "at": at, "data": data,
+                    "changes": changes, "baseline": baseline}
+        except _GrowthAuthError as exc:
+            return {"ok": False, "error": "认证被拒绝（%s）" % exc}
+        except Exception as exc:
+            _trace("growth: 失败 %r" % (exc,))
+            return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
+        finally:
+            _SIGNIN_LOCK.release()
+
     # ---------- 脚本服务（Windows 计划任务） ----------
 
     def service_status(self):
@@ -780,6 +1208,23 @@ def main():
             return
 
     api = Api()
+
+    # WebView2 会对被遮挡/后台窗口节流 JS 定时器（最慢 1 分钟一次）。
+    # 看门狗靠 5 秒一次的心跳判断 UI 是否还活着；一旦被节流，窗口只是
+    # 被别的窗口盖住就会被误判成卡死。这三个开关在 WebView2 初始化前
+    # 必须设置，所以放在 create_window 之前。
+    _flags = ("--disable-background-timer-throttling "
+              "--disable-backgrounding-occluded-windows "
+              "--disable-renderer-backgrounding")
+    if os.environ.get("WORKBUDDY_DISABLE_GPU") == "1":
+        # 卡死若与 DirectComposition/GPU 呈现有关，这个开关可用于对照实验。
+        # 默认不开：软件渲染会改变滚动/动画观感。
+        _flags += " --disable-gpu"
+    _args = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    if _flags not in _args:
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+            _args + " " + _flags).strip()
+
     window = webview.create_window(
         title,
         os.path.join(ASSETS, "index.html"),
@@ -801,6 +1246,8 @@ def main():
             watchdog = win_guard.UIWatchdog(
                 os.path.join(_diag_dir(), "watchdog.log"))
             watchdog.start()
+            # 前端心跳直接喂给看门狗；这是判断 UI 线程是否还活着的第三路信号
+            api._watchdog = watchdog
         except Exception as exc:
             _trace("UI 看门狗启动失败: %r" % (exc,))
             # 构造失败的场景 watchdog 仍是 None；构造成功但 start 失败的

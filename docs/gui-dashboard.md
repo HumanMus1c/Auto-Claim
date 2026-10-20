@@ -34,7 +34,7 @@
 2. 4 张指标卡 —— 今日积分 / 连签天数 / 总积分 / 凭据格式
 3. 操作按钮 —— 写操作带二次确认，主按钮 hover 加深而非变白
 4. 脚本服务 —— 两个 Windows 计划任务的安装 / 启用 / 运行状态，以及安装、启停、立即运行、卸载操作
-5. 云端任务 —— 独立整行，按「未完成 / 已完成」分页签，带 `当前/目标` 进度；**始终完整展开，不设列表内滚动**（窗口放不下时整页滚动）
+5. 成长中心 —— 独立整行，上方是 Buddy 旅行 / 补登 / 连登兑换 / 抽奖 / Buddy 盲盒概览卡，下方是云端任务，按「未完成 / 已完成」分页签，带 `当前/目标` 进度；**始终完整展开，不设列表内滚动**（窗口放不下时整页滚动）
 6. 签到状态 + 当月日历 —— 同一行
 7. 日志 —— 整行收尾，按级别着色带图标，支持一键复制
 
@@ -53,18 +53,28 @@
 
 启动顺序：
 
-1. `bootstrap()` —— 返回环境信息与上次缓存结果，界面先用缓存填充卡片，避免开场一片「—」
+1. `bootstrap()` —— 返回环境信息与上次缓存结果（含 `growth.json` 快照），界面先用缓存填充卡片，避免开场一片「—」
 2. 自动执行 `status`，随后 `doctor`
-3. 后台静默拉取一次任务列表，不打断启动
+3. 后台静默拉取一次成长中心，不打断启动；`auto` / `growth` 执行完成后自动重拉一次
 
-任务列表走 `GET /v2/activity/growth/tasks`，认证链路直接复用 `signin.py` 的 `find_auth_file` / `resolve_session` / `build_headers` / `get`，不另写一份 crypto。
+成长中心走 `GET /v2/activity/growth/{tasks,buddy/travel/status,streak,heatmap,redeem/summary,lottery/chances,energy,buddy/quota}`，认证链路直接复用 `signin.py` 的 `find_auth_file` / `resolve_session` / `build_headers` / `get`，不另写一份 crypto。所有请求都是 GET；只有 `run('auto' / 'growth')` 会触发写操作。
+
+每次拉取会与 `%LOCALAPPDATA%\WorkBuddyDashboard\growth.json` 里的上次快照比较：
+
+- 任务新增/移除、状态或进度变化
+- Buddy 旅行状态、地点、今日名额
+- 连签天数、补登卡余额、可补断签日期
+- 连登兑换各档位状态
+- 抽奖机会、能量、Buddy 盲盒是否可开、能量单价
+
+有变化时逐条写进 `run.log`，同时推送到界面运行日志；`auto` / `growth` 执行完成后也会自动比较并记录，方便确认脚本到底改变了哪些数据。单次拉取部分接口失败时不会覆盖快照、也不会误报数据消失。
 
 ### 并发约束
 
 `signin.py` 用模块级全局变量记录本轮时间预算（`_started_at` / `_budget_seconds`），并发进入会互相干扰。因此：
 
 - 所有进入 `signin` 的路径共用一把模块级 `_SIGNIN_LOCK`。
-- `tasks()` 用**非阻塞**加锁：`auto` 可能跑几分钟，拿任务列表时干等会让界面像卡死，拿不到就快速返回「有命令正在执行」。
+- `tasks()` / `growth()` 用**非阻塞**加锁：`auto` 可能跑几分钟，拿数据时干等会让界面像卡死，拿不到就快速返回「有命令正在执行」。
 
 ## 脚本服务（Windows 计划任务）
 
@@ -99,7 +109,9 @@
 两者都在 `dashboard/win_guard.py`，只依赖 Win32 `ctypes`。
 
 - **单实例**：启动时创建命名互斥量 `Local\WorkBuddyDashboard.SingleInstance`。第二个实例不会创建 WebView2，而是找到已有窗口并恢复/置前；已有窗口无响应时给出原生提示后退出。
-- **UI 看门狗**：后台线程每 1 秒向主窗口发送 `WM_NULL`，用 `SendMessageTimeoutW(..., SMTO_ABORTIFHUNG, 2000ms)` 探测消息循环。连续 3 次超时会先把所有 Python 线程栈写入 `watchdog.log`，然后 `os._exit(3)`，立即释放 WebView2 子进程和 DirectComposition 表面，避免整个 DWM/任务栏被拖住。
+- **UI 看门狗**：后台线程每 1 秒检查一次主窗口，同时看三路信号：Windows 自己的 `IsHungAppWindow()`（和任务管理器“未响应”、WER `AppHangB1` 同一套 5 秒判定）、`SendMessageTimeoutW(WM_NULL, 1000ms)`，以及前端每 5 秒一次的 `Api.heartbeat()` 端到端心跳。连续 2 次（约 2–3 秒）判定卡死时，写入所有 Python 线程栈、抓一份原生 minidump，然后 `os._exit(3)`，立即释放 WebView2 子进程和 DirectComposition 表面，避免整个 DWM/任务栏被拖住。
+
+  只看 `WM_NULL` 是不够的：2026-10-20 那次 `AppHangB1` 里 Windows 已判定窗口 idle，旧版看门狗却一次失败都没记录到。现在每次判定正常也会每 2 分钟写一行 `探测正常`，用于区分“真的正常”和“看门狗根本没在跑”。
 
 看门狗刻意不调用 `DestroyWindow`：窗口卡死时销毁操作本身也可能阻塞。自动退出后重新启动即可。调试时可设 `WORKBUDDY_WATCHDOG=0` 关闭。
 
@@ -110,9 +122,11 @@
 ```text
 %LOCALAPPDATA%\WorkBuddyDashboard\
 ├── last_result.json   上次查询结果（下次启动先渲染，再刷新）
-├── run.log            历史日志（界面日志区的持久化副本）
+├── growth.json        上次成长中心快照（成长中心缓存 + 数据变化比较基线）
+├── run.log            历史日志（界面日志区的持久化副本，含成长中心变化）
 ├── crash.log          Python 与前端 JS 的异常
-├── watchdog.log       UI 看门狗日志；卡死时的线程栈
+├── watchdog.log       UI 看门狗日志；探测记录、卡死线程栈
+├── dumps\             卡死时抓的原生 minidump（hang-*.dmp，最多保留 3 份）
 └── trace.log          仅 WORKBUDDY_DEBUG=1 时产生，见下
 ```
 
@@ -144,6 +158,8 @@ $env:WORKBUDDY_DEBUG = "1"
 | `WORKBUDDY_DEMO_SIGNIN` | 直接指定 `signin.py` 路径，优先级最高，跳过所有自动搜索 |
 | `WORKBUDDY_DEBUG` | `1` 时启用上述追踪与探针 |
 | `WORKBUDDY_WATCHDOG` | `0` 时关闭 UI 看门狗（仅用于调试） |
+| `WORKBUDDY_HANG_DUMP` | `0` 时卡死不抓 minidump（只写线程栈） |
+| `WORKBUDDY_DISABLE_GPU` | `1` 时给 WebView2 加 `--disable-gpu`，用于排查 DirectComposition 相关卡死 |
 
 ## 运行方式
 
@@ -156,4 +172,6 @@ python dashboard/webview/build_exe.py
 ```
 
 打包与校验流水线见 [gui-dashboard-packaging.md](gui-dashboard-packaging.md)；
-开发过程中踩过的坑与排查方法见 [gui-dashboard-troubleshooting.md](gui-dashboard-troubleshooting.md)。
+开发过程中踩过的坑与排查方法见 [gui-dashboard-troubleshooting.md](gui-dashboard-troubleshooting.md)；
+两次 `AppHangB1` 卡死事件的证据与看门狗改造见
+[gui-dashboard-hang-analysis.md](gui-dashboard-hang-analysis.md)。

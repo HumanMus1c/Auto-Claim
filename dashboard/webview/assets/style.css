@@ -379,7 +379,7 @@ main {
 }
 .svc-log:empty { display: none; }
 
-/* ---------- 云端任务 ---------- */
+/* ---------- 成长中心任务 ---------- */
 
 .tabs {
   display: flex;
@@ -653,11 +653,105 @@ main {
   flex-direction: column;
 }
 
-/* 云端任务：独占整行，任务卡横向铺开、始终完整展开 */
+/* 成长中心：独占整行，概览卡 + 任务卡始终完整展开 */
 /* flex:0 0 auto 必须保留：窗口不够高时主区是滚动容器，
    若沿用默认的 0 1 auto，这一栏会先被压扁到 1px（曾整栏"消失"）。 */
 .pane-tasks {
   flex: 0 0 auto;
+}
+
+.growth-overview {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  padding: 10px 12px 4px;
+}
+
+.growth-overview .empty {
+  grid-column: 1 / -1;
+  margin: 8px 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.growth-errors {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--warn);
+  line-height: 1.5;
+}
+
+.growth-card {
+  padding: 9px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  min-width: 0;
+}
+
+.growth-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.growth-card-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.growth-card-value {
+  margin-top: 3px;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.growth-card-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 3px;
+}
+
+.growth-card-line {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.growth-card-line.warn { color: var(--warn); }
+
+.growth-card .bar { margin-top: 6px; }
+.growth-card .bar-label { font-size: 10px; }
+
+.growth-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px 0;
+}
+
+.growth-subhead h3 {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: .3px;
+}
+
+.growth-updated {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 /* 运行日志：最后独占整行，并保证最小可用高度 */

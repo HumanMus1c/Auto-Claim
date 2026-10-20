@@ -24,6 +24,8 @@ REQUIRED = [
     ".act-group", ".act-sep", ".actions",
     ".card", ".card-value", ".cards",
     ".tasklist", ".task", ".task-title", ".bar", ".tag",
+    ".growth-overview", ".growth-card", ".growth-card-value",
+    ".growth-card-line", ".growth-subhead", ".growth-updated",
     ".kv", ".cal", ".cal-day", ".cal-grid",
     ".pane-service", ".svc-pill", ".svc-task", ".svc-actions", ".svc-log",
     ".log .line", ".pane", ".pane-head", ".row2",

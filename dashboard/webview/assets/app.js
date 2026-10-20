@@ -265,7 +265,7 @@ function renderFromDoctor(raw) {
       : (d.runtime ? '运行时已就绪' : (d.report || '')));
 }
 
-/* ---------- 云端任务 ---------- */
+/* ---------- 成长中心任务 ---------- */
 
 const TASK_TABS = {
   // accept_status 的服务端取值，completed 保留兼容
@@ -282,6 +282,7 @@ const TASK_LABEL = {
 
 let TASKS = [];
 let TASK_TAB = 'todo';
+let GROWTH = null;
 
 function renderTasks() {
   const box = $('tasklist');
@@ -293,7 +294,7 @@ function renderTasks() {
 
   box.innerHTML = '';
   if (!TASKS.length) {
-    box.innerHTML = '<p class="empty">点击「刷新任务」拉取</p>';
+    box.innerHTML = '<p class="empty">点击「刷新成长中心」拉取</p>';
     return;
   }
   if (!list.length) {
@@ -371,24 +372,283 @@ function makeTag(text, cls) {
   return s;
 }
 
-function loadTasks(silent) {
-  const btn = $('btnTasks');
-  btn.disabled = true;
-  btn.textContent = '拉取中…';
-  call('tasks')
-    .then((r) => {
-      if (r && r.ok) {
-        TASKS = r.items || [];
-        renderTasks();
-        if (!silent) appendLog('已拉取云端任务：' + TASKS.length + ' 个', 'ok');
+/* ---------- 成长中心概览 ---------- */
+
+const TRAVEL_LABEL = {
+  idle: '待命',
+  traveling: '旅行中',
+  arrived: '已到达',
+  unknown: '未知',
+};
+const REDEEM_LABEL = {
+  available: '可兑换',
+  claimed: '已兑换',
+  locked: '未解锁',
+  unknown: '未知',
+};
+
+function growthEta(arriveAt, serverNow) {
+  if (arriveAt == null || serverNow == null) return '';
+  const left = Number(arriveAt) - Number(serverNow);
+  if (!Number.isFinite(left)) return '';
+  if (left <= 0) return '已到达待领取';
+  const minutes = Math.max(1, Math.round(left / 60));
+  if (minutes < 60) return '约 ' + minutes + ' 分钟后回';
+  return '约 ' + (left / 3600).toFixed(1) + ' 小时后回';
+}
+
+function growthTierLabel(tier) {
+  const text = String(tier || '');
+  return /^\d+d$/.test(text) ? text.slice(0, -1) + ' 天' : text;
+}
+
+function makeGrowthCard(label) {
+  const el = document.createElement('div');
+  el.className = 'growth-card';
+
+  const head = document.createElement('div');
+  head.className = 'growth-card-head';
+  const name = document.createElement('span');
+  name.className = 'growth-card-label';
+  name.textContent = label;
+  head.appendChild(name);
+  el.appendChild(head);
+
+  const value = document.createElement('div');
+  value.className = 'growth-card-value';
+  el.appendChild(value);
+
+  const lines = document.createElement('div');
+  lines.className = 'growth-card-lines';
+  el.appendChild(lines);
+
+  return { el, value, lines };
+}
+
+function addGrowthLine(card, text, cls) {
+  if (!text) return;
+  const p = document.createElement('p');
+  p.className = 'growth-card-line' + (cls ? ' ' + cls : '');
+  p.textContent = text;
+  p.title = text;
+  card.lines.appendChild(p);
+}
+
+function addGrowthBar(card, pct, left, right) {
+  const safe = Math.max(0, Math.min(100, Number(pct) || 0));
+  const bar = document.createElement('div');
+  bar.className = 'bar' + (safe >= 100 ? ' full' : '');
+  const fill = document.createElement('i');
+  fill.style.width = safe + '%';
+  bar.appendChild(fill);
+  card.lines.appendChild(bar);
+
+  const label = document.createElement('div');
+  label.className = 'bar-label';
+  const a = document.createElement('span');
+  a.textContent = left || '';
+  const b = document.createElement('span');
+  b.textContent = right || '';
+  label.append(a, b);
+  card.lines.appendChild(label);
+}
+
+function renderGrowth(data, at) {
+  const box = $('growthOverview');
+  if (!box) return;
+  data = (data && typeof data === 'object') ? data : {};
+  GROWTH = data;
+  box.innerHTML = '';
+
+  const updated = $('growthUpdated');
+  if (updated) updated.textContent = at ? '更新于 ' + at : '刚刚更新';
+
+  const errors = Array.isArray(data.errors) ? data.errors : [];
+  if (errors.length) {
+    const err = document.createElement('p');
+    err.className = 'growth-errors';
+    err.textContent = '部分数据读取失败：' + errors.join('；');
+    box.appendChild(err);
+  }
+
+  // 任务接口失败时保留上一次的任务列表，避免一次网络抖动把整栏清空。
+  const tasksFailed = errors.some((e) => String(e).indexOf('/tasks') === 0);
+  if (Array.isArray(data.tasks) && !tasksFailed) {
+    TASKS = data.tasks;
+    renderTasks();
+  }
+
+  // Buddy 旅行
+  const travelCard = makeGrowthCard('Buddy 旅行');
+  if (!data.travel) {
+    travelCard.value.textContent = '—';
+    addGrowthLine(travelCard, '未取到数据');
+  } else {
+    const travel = data.travel;
+    const state = travel.state || 'unknown';
+    travelCard.value.textContent = TRAVEL_LABEL[state] || state;
+    if (state === 'traveling') {
+      const eta = growthEta(travel.arrive_at, travel.server_now);
+      addGrowthLine(travelCard, (travel.location ? '前往 ' + travel.location : '旅行中')
+        + (eta ? ' · ' + eta : ''));
+    } else if (state === 'arrived') {
+      addGrowthLine(travelCard, '旅行礼物待领取');
+    } else if (state === 'idle') {
+      addGrowthLine(travelCard, travel.daily_limit_reached ? '今日派出名额已用完' : '今日可派出');
+    } else {
+      addGrowthLine(travelCard, '状态未知');
+    }
+    if (state !== 'idle') {
+      addGrowthLine(travelCard, travel.daily_limit_reached ? '今日名额：已用完' : '今日名额：可用');
+    }
+    if (travel.reward_credit) addGrowthLine(travelCard, '待领礼物：+' + travel.reward_credit + ' 积分');
+  }
+  box.appendChild(travelCard.el);
+
+  // 补登
+  const streak = data.streak || {};
+  const makeup = streak.makeup_cards || {};
+  const makeupCard = makeGrowthCard('补登');
+  if (!data.streak) {
+    makeupCard.value.textContent = '—';
+    addGrowthLine(makeupCard, '未取到数据');
+  } else {
+    const balance = firstNum(makeup.balance);
+    const max = firstNum(makeup.max) || 4;
+    makeupCard.value.textContent = (balance != null ? balance : '—') + ' / ' + max + ' 张';
+    if (balance != null && balance > 0) {
+      const dates = Array.isArray(streak.makeup_candidates) ? streak.makeup_candidates : [];
+      if (dates.length) {
+        addGrowthLine(makeupCard, '可补 ' + dates.length + ' 天 · 最近 ' + dates[0]);
+      } else if (streak.makeup_error) {
+        addGrowthLine(makeupCard, '可补日期读取失败', 'warn');
       } else {
-        appendLog('拉取任务失败：' + (r && r.error || '未知错误'), 'err');
+        addGrowthLine(makeupCard, '暂无可补日期');
+      }
+      if (streak.makeup_error) addGrowthLine(makeupCard, streak.makeup_error, 'warn');
+    } else if (balance === 0) {
+      addGrowthLine(makeupCard, '暂无补登卡');
+    } else {
+      addGrowthLine(makeupCard, '未取到补登卡余额');
+    }
+    if (balance != null) {
+      addGrowthBar(makeupCard, max ? (balance / max) * 100 : 0,
+        balance + ' / ' + max, '上限 ' + max);
+    }
+  }
+  box.appendChild(makeupCard.el);
+
+  // 连登兑换
+  const redeem = data.redeem || {};
+  const redeemCard = makeGrowthCard('连登兑换');
+  if (!data.streak && !data.redeem) {
+    redeemCard.value.textContent = '—';
+    addGrowthLine(redeemCard, '未取到数据');
+  } else {
+    const days = firstNum(streak.days);
+    redeemCard.value.textContent = days != null ? '连签 ' + days + ' 天' : '—';
+    const next = streak.next_tier;
+    const remain = firstNum(streak.next_tier_remaining);
+    if (next && remain != null) {
+      addGrowthLine(redeemCard, '下一档 ' + growthTierLabel(next) + '，还差 ' + remain + ' 天');
+      const target = parseInt(String(next), 10);
+      if (days != null && target > 0) {
+        addGrowthBar(redeemCard, (days / target) * 100,
+          days + ' / ' + target, remain + ' 天后解锁');
+      }
+    } else if (days != null) {
+      addGrowthLine(redeemCard, '已达最高档');
+    }
+    const tiers = Array.isArray(redeem.tiers) ? redeem.tiers : [];
+    if (tiers.length) {
+      addGrowthLine(redeemCard, tiers.map((t) =>
+        (t.label || growthTierLabel(t.tier)) + ' '
+        + (REDEEM_LABEL[t.status] || t.status || '未知')).join(' · '));
+      const available = tiers.find((t) => t.status === 'available');
+      if (available) {
+        const bits = [];
+        if (available.credit) bits.push('+' + available.credit + ' 积分');
+        if (available.energy) bits.push('+' + available.energy + ' 能量');
+        if (available.cards) bits.push('+' + available.cards + ' 补登卡');
+        if (available.chances) bits.push('+' + available.chances + ' 抽奖');
+        if (bits.length) addGrowthLine(redeemCard, '可兑奖励：' + bits.join(' · '));
+      }
+    } else {
+      addGrowthLine(redeemCard, '未取到兑换档位');
+    }
+  }
+  box.appendChild(redeemCard.el);
+
+  // 抽奖
+  const lotteryCard = makeGrowthCard('抽奖');
+  if (!data.lottery) {
+    lotteryCard.value.textContent = '—';
+    addGrowthLine(lotteryCard, '未取到数据');
+  } else {
+    const chances = firstNum(data.lottery.balance);
+    lotteryCard.value.textContent = chances != null ? chances + ' 次' : '—';
+    addGrowthLine(lotteryCard, chances == null ? '未取到抽奖次数'
+      : (chances > 0 ? '有 ' + chances + ' 次机会待使用' : '暂无抽奖机会'));
+    addGrowthLine(lotteryCard, '每轮最多开 1 次 · 实物奖需手动填地址');
+  }
+  box.appendChild(lotteryCard.el);
+
+  // Buddy 盲盒
+  const buddyCard = makeGrowthCard('Buddy 盲盒');
+  if (!data.buddy && !data.energy) {
+    buddyCard.value.textContent = '—';
+    addGrowthLine(buddyCard, '未取到数据');
+  } else {
+    const buddy = data.buddy || {};
+    const energy = data.energy || {};
+    const affordable = firstNum(buddy.affordable);
+    const balance = firstNum(buddy.energy, energy.balance);
+    const cost = firstNum(buddy.cost_per_open);
+    const maxOpen = firstNum(buddy.max_open_count);
+    buddyCard.value.textContent = affordable != null ? '可开 ' + affordable + ' 次' : '—';
+    if (balance != null || cost != null) {
+      addGrowthLine(buddyCard, '能量 ' + (balance != null ? balance : '—')
+        + (cost != null ? ' / ' + cost : '')
+        + (maxOpen != null ? ' · 单次最多 ' + maxOpen + ' 个' : ''));
+    }
+    if (balance != null && cost) {
+      addGrowthBar(buddyCard, (balance / cost) * 100, balance + ' 能量', '单价 ' + cost);
+    }
+    if (affordable === 0) addGrowthLine(buddyCard, '能量不足，继续攒能量');
+  }
+  box.appendChild(buddyCard.el);
+}
+
+function loadGrowth(silent) {
+  const btn = $('btnGrowth');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '刷新中…';
+  }
+  call('growth')
+    .then((r) => {
+      if (!r || !r.ok) {
+        appendLog('刷新成长中心失败：' + ((r && r.error) || '未知错误'), 'err');
+        return;
+      }
+      renderGrowth(r.data || {}, r.at);
+      const errors = (r.data && r.data.errors) || [];
+      errors.forEach((e) => appendLog('成长中心部分数据读取失败：' + e, 'warn'));
+      const changes = Array.isArray(r.changes) ? r.changes : [];
+      if (changes.length) {
+        appendLog('成长中心数据变化（' + (r.at || '') + '）：', 'meta');
+        changes.forEach((line) => appendLog('  ' + line, 'info'));
+      } else if (!silent && !errors.length) {
+        appendLog('成长中心已刷新（' + (r.at || '')
+          + (r.baseline ? '，首次建立基线' : '，数据无变化') + '）', 'meta');
       }
     })
-    .catch((e) => appendLog('拉取任务异常：' + e, 'err'))
+    .catch((e) => appendLog('刷新成长中心异常：' + e, 'err'))
     .finally(() => {
-      btn.disabled = false;
-      btn.textContent = '刷新任务';
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '刷新成长中心';
+      }
     });
 }
 
@@ -495,6 +755,11 @@ window.__onBackend = function (kind, data) {
       setBadge('exit=' + data.exit, 'err');
       appendLog('执行失败，退出码 ' + data.exit, 'err');
     }
+    // 成长中心命令可能改变旅行、补登卡、连登、抽奖或能量；跑完立即重拉一次，
+    // 让概览与日志都反映最新状态。
+    if (data.action === 'auto' || data.action === 'growth') {
+      loadGrowth(true);
+    }
   }
 };
 
@@ -528,10 +793,13 @@ function run(action) {
 }
 
 /** 串行执行：后端同一时刻只允许一个任务。 */
-function runSeries(actions) {
+function runSeries(actions, done) {
   const queue = actions.slice();
   const step = () => {
-    if (!queue.length) return;
+    if (!queue.length) {
+      if (typeof done === 'function') done();
+      return;
+    }
     run(queue.shift());
     const wait = () => {
       if (!BUSY) step();
@@ -834,7 +1102,7 @@ function resetSvcPending() {
 
 function scheduleServicePoll() {
   if (SVC_TIMER) clearTimeout(SVC_TIMER);
-  const delay = (SERVICE && SERVICE.running) ? 15000 : 60000;
+  const delay = (SERVICE && SERVICE.running) ? 20000 : 180000;
   SVC_TIMER = setTimeout(() => {
     if (document.hidden) {
       scheduleServicePoll();
@@ -909,6 +1177,24 @@ function serviceAction(action) {
     });
 }
 
+/* ---------- 存活心跳 ---------- */
+
+// 每 5 秒一次，等上一次 Promise 落地后才排下一次。UI 线程或 WebView2
+// 卡住时这个 Promise 不会返回，心跳自然停止；后端看门狗据此判定界面
+// 已死并强制退出，避免卡死窗口把整个桌面的窗口切换一起拖住。
+let BEAT_STOPPED = false;
+
+function startHeartbeat(api) {
+  const tick = async () => {
+    if (BEAT_STOPPED) return;
+    try { await api.heartbeat(); } catch (e) { /* 看门狗负责收尾 */ }
+    if (!BEAT_STOPPED) setTimeout(tick, 5000);
+  };
+  setTimeout(tick, 3000);
+}
+
+window.addEventListener('beforeunload', () => { BEAT_STOPPED = true; });
+
 /* ---------- 启动 ---------- */
 
 async function boot(api) {
@@ -945,6 +1231,10 @@ async function boot(api) {
     renderFromStatus(cached.status.payload);
     appendLog('已载入上次签到状态（' + cached.status.at + '）', 'meta');
   }
+  if (info.growth && info.growth.data) {
+    renderGrowth(info.growth.data, info.growth.at);
+    appendLog('已载入上次成长中心数据（' + (info.growth.at || '') + '）', 'meta');
+  }
 
   if (info.history && info.history.length) {
     info.history.forEach((l) => appendLog(l));
@@ -957,15 +1247,17 @@ async function boot(api) {
   setBadge('就绪', 'ok');
 
   // 脚本服务状态独立刷新：计划任务可能被系统或其他工具改动。
-  // 空闲时 60 秒一次，任务运行中 15 秒一次；操作后也会立即刷新。
+  // 空闲时 3 分钟一次，任务运行中 20 秒一次；操作后也会立即刷新。
+  // 频次不必太高：每次刷新都要起一次 PowerShell，纯属浪费。
   refreshService(true);
   scheduleServicePoll();
 
   // 启动即刷新：缓存只是"先有个数看"，真实数据以这次查询为准。
   // doctor 只跑后端、不暴露按钮，用来填充「凭据格式」那张卡。
   if (info.signin_exists) {
-    runSeries(['status', 'doctor']);
-    loadTasks(true);              // 后台静默拉一次，不打断启动
+    // status/doctor 占用 signin 锁；等它们跑完再拉成长中心，避免启动时
+    // 非阻塞加锁失败，在日志里留下一条无意义的“有命令正在执行”。
+    runSeries(['status', 'doctor'], () => loadGrowth(true));
   } else {
     setBadge('缺少 signin.py', 'err');
   }
@@ -985,7 +1277,7 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btnClear').addEventListener('click', clearLog);
   $('btnCopy').addEventListener('click', copyLog);
   $('themeToggle').addEventListener('click', toggleTheme);
-  $('btnTasks').addEventListener('click', () => loadTasks(false));
+  $('btnGrowth').addEventListener('click', () => loadGrowth(false));
 
   $('btnSvcRefresh').addEventListener('click', () => refreshService(false));
   Object.keys(SVC_BUTTONS).forEach((action) => {
@@ -1030,6 +1322,7 @@ document.addEventListener('DOMContentLoaded', function () {
     if (state.ready) return;
     if (!window.pywebview || !window.pywebview.api) return;
     state.ready = true;                    // 防止并发重复初始化
+    startHeartbeat(window.pywebview.api);
     boot(window.pywebview.api)
       .catch((e) => {
         appendLog('初始化失败：' + (e && e.message || e), 'err');

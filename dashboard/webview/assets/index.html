@@ -73,7 +73,7 @@
   <section class="actions">
     <div class="act-group" id="actGroup"></div>
     <div class="spacer"></div>
-    <button class="btn ghost" id="btnTasks">刷新任务</button>
+    <button class="btn ghost" id="btnGrowth">刷新成长中心</button>
     <button class="btn ghost" id="btnClear">清空日志</button>
   </section>
   <p class="hint" id="actionHint">只读查询不会改动服务端状态；带「写操作」标记的会真实领取。悬停按钮可查看完整说明。</p>
@@ -103,17 +103,24 @@
     </div>
   </section>
 
-  <!-- ④ 云端任务（独占一行） -->
+  <!-- ④ 成长中心：概览 + 云端任务（独占一行） -->
   <section class="pane pane-tasks">
     <div class="pane-head">
-      <h2>云端任务</h2>
+      <h2>成长中心</h2>
+      <span class="growth-updated" id="growthUpdated">尚未刷新</span>
+    </div>
+    <div class="growth-overview" id="growthOverview">
+      <p class="empty">点击「刷新成长中心」加载 Buddy 旅行、补登、连登兑换、抽奖与 Buddy 盲盒数据</p>
+    </div>
+    <div class="growth-subhead">
+      <h3>任务</h3>
       <div class="tabs" id="taskTabs">
         <button class="tab active" data-tab="todo">未完成 <b id="cntTodo">0</b></button>
         <button class="tab" data-tab="done">已完成 <b id="cntDone">0</b></button>
       </div>
     </div>
     <div class="tasklist" id="tasklist">
-      <p class="empty">点击「刷新任务」拉取</p>
+      <p class="empty">点击「刷新成长中心」拉取</p>
     </div>
   </section>
 

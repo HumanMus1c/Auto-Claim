@@ -17,6 +17,7 @@ EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-claim-dashboar
 # app.py 里后期才加入的函数名/属性，用作"新版标记"
 FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 "service_status", "service_action",
+                "_growth_snapshot", "_growth_changes",
                 "acquire_single_instance", "UIWatchdog"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
