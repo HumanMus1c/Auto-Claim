@@ -2,7 +2,7 @@
 
 > 给 `signin.py` 配一个本地图形界面：单文件 exe、无终端窗口、与脚本同级分发。
 >
-> 代码位于 `demos/webview/`，产物 `WorkBuddyConsole.exe` 落在仓库根目录（与 `signin.py` 并排）。
+> 代码位于 `dashboard/webview/`，产物 `Auto-claim-dashboard.exe` 落在仓库根目录（与 `signin.py` 并排）。
 
 ## 目标与边界
 
@@ -33,15 +33,15 @@
 1. 顶栏 —— 环境信息（Python 版本、平台、`signin.py` 定位结果）+ 主题切换
 2. 4 张指标卡 —— 今日积分 / 连签天数 / 总积分 / 凭据格式
 3. 操作按钮 —— 写操作带二次确认，主按钮 hover 加深而非变白
-4. 云端任务 —— 独立整行，按「未完成 / 已完成」分页签，带 `当前/目标` 进度
+4. 云端任务 —— 独立整行，按「未完成 / 已完成」分页签，带 `当前/目标` 进度；**始终完整展开，不设列表内滚动**（窗口放不下时整页滚动）
 5. 签到状态 + 当月日历 —— 同一行
 6. 日志 —— 整行收尾，按级别着色带图标，支持一键复制
 
 外观细节：
 
-- **跟随系统主题与强调色**：`demos/win_theme.py` 读注册表 `HKCU\Software\Microsoft\Windows\DWM\ColorizationColor`；强调色按比例调整明度，避免嵌套元素上使用 CSS `filter` 产生副作用。
+- **跟随系统主题与强调色**：`dashboard/win_theme.py` 读注册表 `HKCU\Software\Microsoft\Windows\DWM\ColorizationColor`；强调色按比例调整明度，避免嵌套元素上使用 CSS `filter` 产生副作用。
 - **图标自动反色**：纯线条 SVG，`stroke` 取 `currentColor`，只需设置容器的 `color`，无需维护亮/暗两套图。几何由 `assets/make_icon.py`（Pillow）同时生成 `icon.svg` 与 7 种尺寸的 `icon.ico`。
-- **标题栏**：`demos/win_title.py` 用 Win32 API 设置 Unicode 标题，绕开早期编码问题。
+- **标题栏**：`dashboard/win_title.py` 用 Win32 API 设置 Unicode 标题，绕开早期编码问题。
 
 ## 数据流
 
@@ -65,15 +65,25 @@
 - 所有进入 `signin` 的路径共用一把模块级 `_SIGNIN_LOCK`。
 - `tasks()` 用**非阻塞**加锁：`auto` 可能跑几分钟，拿任务列表时干等会让界面像卡死，拿不到就快速返回「有命令正在执行」。
 
+## 单实例与 UI 看门狗
+
+两者都在 `dashboard/win_guard.py`，只依赖 Win32 `ctypes`。
+
+- **单实例**：启动时创建命名互斥量 `Local\WorkBuddyDashboard.SingleInstance`。第二个实例不会创建 WebView2，而是找到已有窗口并恢复/置前；已有窗口无响应时给出原生提示后退出。
+- **UI 看门狗**：后台线程每 1 秒向主窗口发送 `WM_NULL`，用 `SendMessageTimeoutW(..., SMTO_ABORTIFHUNG, 2000ms)` 探测消息循环。连续 3 次超时会先把所有 Python 线程栈写入 `watchdog.log`，然后 `os._exit(3)`，立即释放 WebView2 子进程和 DirectComposition 表面，避免整个 DWM/任务栏被拖住。
+
+看门狗刻意不调用 `DestroyWindow`：窗口卡死时销毁操作本身也可能阻塞。自动退出后重新启动即可。调试时可设 `WORKBUDDY_WATCHDOG=0` 关闭。
+
 ## 运行时文件
 
 全部落在用户目录，不在程序目录也不在临时解包目录：
 
 ```text
-%LOCALAPPDATA%\WorkBuddyConsole\
+%LOCALAPPDATA%\WorkBuddyDashboard\
 ├── last_result.json   上次查询结果（下次启动先渲染，再刷新）
 ├── run.log            历史日志（界面日志区的持久化副本）
 ├── crash.log          Python 与前端 JS 的异常
+├── watchdog.log       UI 看门狗日志；卡死时的线程栈
 └── trace.log          仅 WORKBUDDY_DEBUG=1 时产生，见下
 ```
 
@@ -81,7 +91,7 @@
 
 ```powershell
 $env:WORKBUDDY_DEBUG = "1"
-.\WorkBuddyConsole.exe
+.\Auto-claim-dashboard.exe
 ```
 
 开启后：
@@ -104,16 +114,17 @@ $env:WORKBUDDY_DEBUG = "1"
 |---|---|
 | `WORKBUDDY_DEMO_SIGNIN` | 直接指定 `signin.py` 路径，优先级最高，跳过所有自动搜索 |
 | `WORKBUDDY_DEBUG` | `1` 时启用上述追踪与探针 |
+| `WORKBUDDY_WATCHDOG` | `0` 时关闭 UI 看门狗（仅用于调试） |
 
 ## 运行方式
 
 ```powershell
 # 源码运行（无终端窗口）
-pythonw.exe demos/webview/app.py
+pythonw.exe dashboard/webview/app.py
 
 # 打包
-python demos/webview/build_exe.py
+python dashboard/webview/build_exe.py
 ```
 
-打包与校验流水线见 [gui-console-packaging.md](gui-console-packaging.md)；
-开发过程中踩过的坑与排查方法见 [gui-console-troubleshooting.md](gui-console-troubleshooting.md)。
+打包与校验流水线见 [gui-dashboard-packaging.md](gui-dashboard-packaging.md)；
+开发过程中踩过的坑与排查方法见 [gui-dashboard-troubleshooting.md](gui-dashboard-troubleshooting.md)。

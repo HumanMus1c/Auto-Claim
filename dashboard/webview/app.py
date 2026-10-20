@@ -3,8 +3,10 @@
 JS 通过 window.pywebview.api.* 调用这里的函数。
 
 设计约束：
-  - 只暴露只读查询（doctor / status）与纯本地信息，绝不代理 claim/auto 等写操作
-  - 每个耗时调用都走后台线程 + 完成事件，界面不会被 420 秒预算的请求卡住
+  - 只暴露非 silent 命令（status / auto / growth / claim / all），
+    写操作由前端二次确认
+  - 命令统一走进程内 _run()（不用 subprocess，避免打包后递归启动）
+  - 每个耗时调用都走后台线程 + 完成事件，界面不会被长超时请求卡住
   - 路径与超时集中在这里，前端只管渲染
 """
 
@@ -36,18 +38,18 @@ def _base_dir():
 
 HERE = _base_dir()
 ASSETS = os.path.join(HERE, "assets")
-DEMOS = os.path.dirname(HERE)
+DASHBOARD = os.path.dirname(HERE)
 
-# win_theme / win_title 在上一级目录，它们是为 PyGui 写的，WebView 版继续复用
-if DEMOS not in sys.path:
-    sys.path.insert(0, DEMOS)
+# win_theme / win_title 在上一级目录（dashboard/），本方案继续复用
+if DASHBOARD not in sys.path:
+    sys.path.insert(0, DASHBOARD)
 
 
 def _locate_signin():
     """定位 signin.py。
 
     搜索起点分两种情况，这里踩过坑：
-      - 源码运行：从脚本所在目录（demos/webview）上溯
+      - 源码运行：从脚本所在目录（dashboard/webview）上溯
       - 打包运行：sys._MEIPASS 是 %TEMP% 下的临时解包目录，从那里上溯只会
         一路搜到 C:\\Users\\，**永远碰不到 exe 所在目录**——而 signin.py 正是
         跟 exe 放在一起的。所以冻结时必须优先从 dirname(sys.executable) 找。
@@ -89,7 +91,6 @@ def _locate_signin():
 
 
 SIGNIN = _locate_signin()
-# _locate_signin() 走过的候选路径，用于失败时告诉用户"到底找过哪些地方"
 
 # 仓库根目录也放进 sys.path：tasks() 要复用 signin.py 的认证链路
 # （凭据解密、请求头、重试），必须能 import 到它。这里直接由
@@ -115,13 +116,19 @@ ACTIONS = {
     "status":  dict(label="查签到状态", write=False, timeout=120,
                     desc="只读查询，不改动任何状态"),
     "auto":    dict(label="签到 + 成长中心", write=True, timeout=660,
-                    desc="今日签到，并跑完成长中心（领礼物/任务/补登/兑换/抽奖）"),
+                    desc="先查签到状态，未签才领取今日积分，再跑完成长中心："
+                         "Buddy 旅行（到达收礼、空闲派发）、接任务与领任务奖、"
+                         "补登卡补当月断签、连登 7/14/28 天奖励兑换、开盲盒、能量开 Buddy"),
     "growth":  dict(label="仅成长中心", write=True, timeout=660,
-                    desc="不签到，只跑成长中心"),
+                    desc="不碰签到接口，只跑成长中心：领旅行礼物与派 Buddy、"
+                         "接任务并领任务奖、补登卡补当月断签（每轮最多 1 张）、"
+                         "连登奖励兑换、开盲盒、能量开 Buddy"),
     "claim":   dict(label="仅领取今日签到", write=True, timeout=120,
-                    desc="只调用领取接口"),
+                    desc="直接调领取接口拿今日积分，不查状态、不跑成长中心；"
+                         "接口幂等，已签时重复点击不会重复发积分"),
     "all":     dict(label="查询 + 领取", write=True, timeout=180,
-                    desc="先查状态再领取"),
+                    desc="调试用：先查一次签到状态，再无条件调一次领取接口，"
+                         "两步的原始返回都打进日志"),
     # doctor 只保留后端能力，启动时自动跑一次填充「凭据格式」卡片，
     # 不在界面上暴露按钮——它对使用者没有可操作性。
     "doctor":  dict(label="离线体检", write=False, timeout=120,
@@ -190,7 +197,7 @@ def _diag_dir():
     彻底查无实据。必须落在用户目录这种真正持久的地方。
     """
     base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    folder = os.path.join(base, "WorkBuddyConsole")
+    folder = os.path.join(base, "WorkBuddyDashboard")
     try:
         os.makedirs(folder, exist_ok=True)
     except OSError:
@@ -619,9 +626,50 @@ def main():
     _trace("main 进入: HERE=%s ASSETS=%s index=%s SIGNIN=%s"
            % (HERE, ASSETS,
               os.path.isfile(os.path.join(ASSETS, "index.html")), SIGNIN))
+
+    title = "WorkBuddy 控制台"
+    guard_handle = None
+    watchdog = None
+    try:
+        import win_guard
+    except Exception as exc:
+        # 单实例/看门狗是保护能力，不应因为它们导致整个控制台起不来。
+        # 打包校验会检查 win_guard.py 是否真的进了 exe；这里只做 fail-open。
+        _trace("win_guard 不可用: %r" % (exc,))
+        win_guard = None
+
+    if win_guard is not None:
+        try:
+            guard_handle, already_running = win_guard.acquire_single_instance()
+        except Exception as exc:
+            _trace("单实例锁异常: %r" % (exc,))
+            guard_handle, already_running = None, False
+
+        if already_running:
+            _trace("检测到已有实例，尝试激活已有窗口")
+            try:
+                state = win_guard.activate_existing_window()
+            except Exception as exc:
+                _trace("激活已有实例失败: %r" % (exc,))
+                state = "missing"
+
+            message = None
+            warning = False
+            if state == "hung":
+                message = ("WorkBuddy 控制台已在运行，但现有窗口无响应。\n\n"
+                           "看门狗（默认开启）会自动结束它；也可以稍后重试，"
+                           "或在任务管理器中结束 Auto-claim-dashboard.exe。")
+                warning = True
+            elif state == "missing":
+                message = ("WorkBuddy 控制台已在运行，但暂时找不到窗口。\n"
+                           "请稍等片刻后再试。")
+            if message:
+                win_guard.show_message(message, title, warning=warning)
+            return
+
     api = Api()
     window = webview.create_window(
-        "WorkBuddy 控制台",
+        title,
         os.path.join(ASSETS, "index.html"),
         js_api=api,
         width=1180,
@@ -633,13 +681,32 @@ def main():
     # _push 要靠它把结果送回前端
     api._window = window
 
+    # UI 看门狗：窗口创建后开始等主窗口，连续几次 WM_NULL 超时就退出，
+    # 避免卡死的 WebView2 窗口把 DWM/任务栏一起拖住。
+    if (win_guard is not None
+            and os.environ.get("WORKBUDDY_WATCHDOG", "1") != "0"):
+        try:
+            watchdog = win_guard.UIWatchdog(
+                os.path.join(_diag_dir(), "watchdog.log"))
+            watchdog.start()
+        except Exception as exc:
+            _trace("UI 看门狗启动失败: %r" % (exc,))
+            # 构造失败的场景 watchdog 仍是 None；构造成功但 start 失败的
+            # 场景由 finally 里的 stop() 兜底，不必在这里重复赋值。
+
     # 仅调试模式：5 秒后主动问 DOM 要状态（见 _probe）
     threading.Thread(target=_probe, args=(window,), daemon=True).start()
 
     # gui="edgechromium" 是必须的，不能省。
     # pywebview 6.2.1 在这台机器上自动后端探测会失败（webview.guilib 一直是 None），
     # start() 表现为静默挂起、不建窗口也不报错，只能靠显式指定后端绕开。
-    webview.start(gui="edgechromium", debug=False, icon=icon_path())
+    try:
+        webview.start(gui="edgechromium", debug=False, icon=icon_path())
+    finally:
+        if watchdog is not None:
+            watchdog.stop()
+        if guard_handle is not None and win_guard is not None:
+            win_guard.release_single_instance(guard_handle)
     _trace("webview.start 返回（窗口已关闭）")
 
 

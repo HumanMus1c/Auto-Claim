@@ -1,4 +1,4 @@
-# 排障记录：九个真实问题与排查方法
+# 排障记录：十个真实问题与排查方法
 
 > 这份文档记录控制台从「第一次打包」到「稳定运行」期间修掉的每一个真实缺陷。
 >
@@ -103,7 +103,7 @@ def _safe_worker(self, action, spec):
 |---|---|
 | 现象 | exe 里的任何异常都查无实据，界面异常后什么痕迹都没有 |
 | 根因 | `crash.log` 写在 `HERE`、`run.log` 写在 `ASSETS`，冻结后它们都在 `%TEMP%\_MEIxxxx`，**进程退出整个目录被删** |
-| 修法 | 统一到用户目录：`_diag_dir()` → `%LOCALAPPDATA%\WorkBuddyConsole\`，并让前端 JS 异常也通过 `log_error()` 落盘 |
+| 修法 | 统一到用户目录：`_diag_dir()` → `%LOCALAPPDATA%\WorkBuddyDashboard\`，并让前端 JS 异常也通过 `log_error()` 落盘 |
 
 这一条本身不修复任何缺陷，但它**是解开僵局的那一步**——改完才第一次看见真实错误：
 
@@ -190,6 +190,31 @@ def _load_signin():
 
 ---
 
+### 10. 「独占整行」的云端任务栏被压成 1px，看起来像没实现
+
+| | |
+|---|---|
+| 现象 | 界面只有指标卡、按钮行、签到状态/本月签到、日志——云端任务整栏「消失」，像独占整行那版没生效（源码与 exe 资源都验证过是最新的） |
+| 根因 | `main` 是纵向 flex 滚动容器；`.row2` 固定 300px、`.pane-log` 最少 260px，卡片/按钮/说明也是固定高，合计已超过默认窗口高度。`.pane` 默认 `min-height: 0`，而 `.pane-tasks` 只有默认的 `flex: 0 1 auto`——**窗口不够高时只有它能被压缩**，于是塌到 1px。任务其实一直在 DOM 里（`tasks` 探针能看到 7 个），只是高度没了 |
+| 放大因素 | 系统「文本大小」140%（辅助功能）会被 Chromium 内核叠加到 DPR 上（125% 显示缩放 × 1.4 = 1.75），1180×800 的窗口实际 CSS 视口只有 833×544。任何窗口高度下都可能触发 |
+| 修法 | `.pane-tasks { flex: 0 0 auto; }`：任务栏不参与压缩，窗口矮时由 `main` 自身滚动兜底 |
+
+判断这类「元素在不在、多高」的问题不要靠截图猜（WebView2 用 DirectComposition，GDI 截图经常不可靠）：
+
+```text
+WORKBUDDY_DEBUG=1                    # 启用 _probe() 探针，或
+WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222   # 接 CDP 直接查询
+```
+
+```js
+document.querySelector('.pane-tasks').getBoundingClientRect().height
+// 修复前：1        修复后：364
+```
+
+`main.scrollHeight(1219) > clientHeight(487)` 也是同一根因的证据：内容本来就放不下、应该滚动，而不是把某一栏挤没。
+
+---
+
 ### 附带：一个把排查带偏的观察
 
 诊断 exe 显示 `sys.executable` 是 8.3 短路径 `C:\Users\SILVER~1\...`，而我用长路径 `C:\Users\SilverT1ger\...` 去检查文件是否存在，据此判断「缓存没写入」。
@@ -238,7 +263,7 @@ window.evaluate_js("JSON.stringify({ready:document.readyState,"
 ```python
 sys.frozen = True
 sys._MEIPASS = r"...\Temp\_MEI_FAKE"
-sys.executable = r"...\WorkBuddyConsole.exe"
+sys.executable = r"...\Auto-claim-dashboard.exe"
 assert app.SEARCHED[0] == os.path.join(exe_dir, "signin.py")
 ```
 

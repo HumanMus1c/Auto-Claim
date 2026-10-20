@@ -12,10 +12,15 @@ import marshal
 import os
 import sys
 
-EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "WorkBuddyConsole.exe")
+EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-claim-dashboard.exe")
 
-# app.py 里后期才加入的函数名，用作"新版标记"
-FINGERPRINTS = ["_diag_dir", "_safe_worker"]
+# app.py 里后期才加入的函数名/属性，用作"新版标记"
+FINGERPRINTS = ["_diag_dir", "_safe_worker",
+                "acquire_single_instance", "UIWatchdog"]
+
+# spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
+# 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。
+REQUIRED_ENTRIES = ["win_theme.py", "win_title.py", "win_guard.py"]
 
 
 def main():
@@ -24,6 +29,15 @@ def main():
     archive = CArchiveReader(EXE)
     names = list(archive.toc)
     print("CArchive 条目数: %d" % len(names))
+
+    missing_entries = [name for name in REQUIRED_ENTRIES
+                       if name not in archive.toc]
+    for name in REQUIRED_ENTRIES:
+        print("  %-18s %s"
+              % (name, "缺失" if name in missing_entries else "存在"))
+    if missing_entries:
+        print("\n[NG] exe 缺少运行期模块 %s" % ", ".join(missing_entries))
+        return 1
 
     # app 是入口脚本，PyInstaller 把它放在 CArchive 顶层（entry 名就是 "app"），
     # 而不是 PYZ 里——所以直接从 CArchive 取它的字节码。

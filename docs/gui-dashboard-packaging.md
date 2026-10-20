@@ -2,7 +2,7 @@
 
 > 单文件、无控制台、产物落在仓库根目录（与 `signin.py` 同级），这样 `_locate_signin()` 能直接命中，exe 可以单独拷走使用。
 >
-> 一条命令完成全部检查与打包：`python demos/webview/build_exe.py`
+> 一条命令完成全部检查与打包：`python dashboard/webview/build_exe.py`
 
 ## 为什么需要流水线
 
@@ -10,21 +10,21 @@
 
 ## spec 关键点
 
-文件：`demos/webview/WorkBuddyConsole.spec`
+文件：`dashboard/webview/Auto-claim-dashboard.spec`
 
 ```python
 HERE  = os.path.abspath(os.path.dirname(SPEC))
 ASSETS = os.path.join(HERE, 'assets')
-DEMOS = os.path.dirname(HERE)      # win_theme / win_title 在这里
-REPO  = os.path.dirname(DEMOS)     # 仓库根：signin.py 在这里
+DASHBOARD = os.path.dirname(HERE)      # win_theme / win_title / win_guard 在这里
+REPO  = os.path.dirname(DASHBOARD)     # 仓库根：signin.py 在这里
 ```
 
 | 配置 | 取值 / 原因 |
 |---|---|
 | `Analysis` 入口 | **绝对路径**。曾用相对 `'app.py'`，在别的 cwd 下执行会解析到错误文件，打出来的 exe 跑旧代码且不报错 |
 | `pathex` | `[HERE, REPO]`。仓库根必须在里面，否则 PyInstaller 找不到 `signin.py`，也就不会分析它内部的 import |
-| `hiddenimports` | `win_theme`、`win_title`、`signin`、`plistlib`、`ntpath`、`winreg`、`webview.platforms.edgechromium`、`webview.platforms.winforms`、`clr`、`pythonnet` |
-| `datas` | 逐文件列出 assets，并跳过 `run.log` / `debug.log` |
+| `hiddenimports` | `win_theme`、`win_title`、`win_guard`、`signin`、`plistlib`、`ntpath`、`winreg`、`webview.platforms.edgechromium`、`webview.platforms.winforms`、`clr`、`pythonnet` |
+| `datas` | 逐文件列出 assets，并跳过 `run.log` / `debug.log`；`win_theme.py` / `win_title.py` / `win_guard.py` 以数据文件放在包根 |
 | `excludes` | `tkinter`、`unittest`、`pydoc_data`、`matplotlib`、`numpy`、`scipy`、`pandas`、`kivy`、`sdl2`、`OpenGL` |
 | `console` | `False`（`--windowed`），不弹终端窗口 |
 
@@ -55,11 +55,11 @@ datas = [
 
 | 阶段 | 检查 | 工具 |
 |---|---|---|
-| 打包前 | `app.py` 语法 | `python -m py_compile` |
+| 打包前 | `app.py` / `win_guard.py` 语法 | `python -m py_compile` |
 | 打包前 | `app.js` 语法 | `node --check` |
 | 打包前 | 函数体内重复代码 / 语法 | `check_dup.py`（AST） |
 | 打包前 | 样式表关键选择器齐全 | `check_css.py` |
-| 打包前 | 冻结路径逻辑 | `test_locate_signin.py` |
+| 打包前 | 冻结路径 / 单实例逻辑 | `test_locate_signin.py`、`test_win_guard.py` |
 | 打包 | PyInstaller | `--clean --noconfirm` |
 | 打包后 | exe 里确实是本版代码 | `verify_exe.py` |
 | 打包后 | 资源与本地逐字节一致 | `verify_assets.py` |
@@ -109,7 +109,7 @@ ENV = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
 ## 产物
 
 ```text
-WorkBuddyConsole.exe    约 14.9 MB    2026-10-19 21:30
+Auto-claim-dashboard.exe    约 14.9 MB    2026-10-19 23:43
 ```
 
 参照 `signin.py` 放在仓库根目录，可单独拷走（同目录需有 `signin.py`）。

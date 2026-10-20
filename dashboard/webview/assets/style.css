@@ -253,6 +253,9 @@ main {
   color: var(--text-dim);
 }
 
+/* 悬停/聚焦命令按钮时，提示行换成该按钮的完整描述：调亮到正文色，以示切换 */
+.hint.show { color: var(--text); }
+
 /* ---------- 云端任务 ---------- */
 
 .tabs {
@@ -281,9 +284,8 @@ main {
 
 .tasklist {
   padding: 10px 12px 12px;
-  overflow-y: auto;
-  max-height: 340px;
-  /* 独占整行后，任务卡横向铺开成多列，避免一列细长 */
+  /* 云端任务始终完整展开：不设 max-height、无列表内滚动，
+     放不下时交给 main（整页）滚动。 */
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
   gap: 8px;
@@ -501,13 +503,28 @@ main {
   gap: 14px;
 }
 
-.pane-cal { max-height: 300px; }
-.pane-cal .kv,
-.pane-cal .cal { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.pane-cal { height: 300px; max-height: 300px; }
 
-/* 云端任务：独占整行，任务卡横向铺开 */
-.pane-tasks .tasklist {
-  max-height: 320px;
+.pane-cal .kv {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* 日历不滚动：日期格按卡片剩余高度等比缩放，页脚固定在卡片底部 */
+.pane-cal .cal {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 云端任务：独占整行，任务卡横向铺开、始终完整展开 */
+/* flex:0 0 auto 必须保留：窗口不够高时主区是滚动容器，
+   若沿用默认的 0 1 auto，这一栏会先被压扁到 1px（曾整栏"消失"）。 */
+.pane-tasks {
+  flex: 0 0 auto;
 }
 
 /* 运行日志：最后独占整行，并保证最小可用高度 */
@@ -658,6 +675,7 @@ main {
 }
 
 .cal-head {
+  flex: 0 0 auto;
   display: grid;
   grid-template-columns: repeat(7, 1fr);
   gap: 4px;
@@ -670,21 +688,35 @@ main {
 }
 
 .cal-grid {
+  flex: 1 1 auto;
+  min-height: 0;
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  /* 行数由 renderCalendar 按月写入，避免空格子占行高 */
+  grid-template-rows: repeat(var(--cal-rows, 6), minmax(0, 1fr));
   gap: 4px;
+}
+
+/* 方块高度跟随行高，宽度再按 1:1 反推；容器变高/变矮都能自适应。
+   max-width 兜底窗口极窄时方块溢出列宽。 */
+.cal-grid i,
+.cal-day {
+  align-self: center;
+  justify-self: center;
+  height: 100%;
+  width: auto;
+  max-width: 100%;
+  aspect-ratio: 1;
 }
 
 .cal-grid i {            /* 占位，保持列对齐 */
   display: block;
-  aspect-ratio: 1;
 }
 
 .cal-day {
   display: flex;
   align-items: center;
   justify-content: center;
-  aspect-ratio: 1;
   border-radius: 6px;
   font-size: 11.5px;
   font-variant-numeric: tabular-nums;
@@ -715,6 +747,7 @@ main {
 }
 
 .cal-foot {
+  flex: 0 0 auto;
   margin-top: 10px;
   display: flex;
   align-items: center;

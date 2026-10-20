@@ -17,7 +17,7 @@ sys.path.insert(0, HERE)
 
 import app  # noqa: E402
 
-# HERE = <repo>/demos/webview，仓库根是它的上两级
+# HERE = <repo>/dashboard/webview，仓库根是它的上两级
 REPO = os.path.dirname(os.path.dirname(HERE))
 
 
@@ -42,7 +42,7 @@ class LocateSigninTest(unittest.TestCase):
     # ---------- 源码模式 ----------
 
     def test_source_mode_finds_repo_signin(self):
-        """源码运行时能从 demos/webview 上溯找到仓库根的 signin.py"""
+        """源码运行时能从 dashboard/webview 上溯找到仓库根的 signin.py"""
         # 源码模式下 sys 本就没有 frozen 属性，直接 del 会 AttributeError
         if hasattr(sys, "frozen"):
             del sys.frozen
@@ -62,7 +62,7 @@ class LocateSigninTest(unittest.TestCase):
         sys.frozen = True
         sys._MEIPASS = os.path.join(os.environ.get("TEMP", "/tmp"), "_MEI_FAKE")
         exe_dir = REPO
-        sys.executable = os.path.join(exe_dir, "WorkBuddyConsole.exe")
+        sys.executable = os.path.join(exe_dir, "Auto-claim-dashboard.exe")
 
         found = app._locate_signin()
 
@@ -86,7 +86,7 @@ class LocateSigninTest(unittest.TestCase):
         sys.frozen = True
         sys._MEIPASS = os.path.join(os.environ.get("TEMP", "/tmp"), "_MEI_FAKE")
         exe_dir = REPO
-        sys.executable = os.path.join(exe_dir, "WorkBuddyConsole.exe")
+        sys.executable = os.path.join(exe_dir, "Auto-claim-dashboard.exe")
 
         app._locate_signin()
 

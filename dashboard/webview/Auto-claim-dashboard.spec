@@ -10,8 +10,8 @@ import os
 # SPEC 由 PyInstaller 注入，指向本 .spec 文件所在目录
 HERE = os.path.abspath(os.path.dirname(SPEC))
 ASSETS = os.path.join(HERE, 'assets')
-DEMOS = os.path.dirname(HERE)          # win_theme / win_title 在上一级
-REPO = os.path.dirname(DEMOS)          # 仓库根：signin.py 在这里
+DASHBOARD = os.path.dirname(HERE)      # win_theme / win_title 在上一级
+REPO = os.path.dirname(DASHBOARD)      # 仓库根：signin.py 在这里
 
 # 打包资源时跳过运行时产物。
 # run.log 一旦被打进去，会在每次启动时解包到 %TEMP%，时间戳看起来
@@ -23,16 +23,19 @@ datas = [
     if os.path.isfile(os.path.join(ASSETS, name)) and name not in SKIP_ASSETS
 ]
 datas += [
-    (os.path.join(DEMOS, 'win_theme.py'), '.'),
-    (os.path.join(DEMOS, 'win_title.py'), '.'),
+    (os.path.join(DASHBOARD, 'win_theme.py'), '.'),
+    (os.path.join(DASHBOARD, 'win_title.py'), '.'),
+    (os.path.join(DASHBOARD, 'win_guard.py'), '.'),
 ]
 
-# win_theme / win_title 是在函数体内 import 的，静态分析抓不到，
-# 必须显式声明；否则冻结后 sys.path 变了就 ModuleNotFoundError。
-# 它们和 app.py 并排放进包内，HERE（冻结时= sys._MEIPASS）本就在 sys.path 上。
+# win_theme / win_title / win_guard 是在函数体内 import 的，
+# 且不在 pathex 里，静态分析抓不到。必须显式声明；否则冻结后 sys.path 变了，
+# 就 ModuleNotFoundError。它们和 app.py 并排放进包内，
+# HERE（冻结时= sys._MEIPASS）本就在 sys.path 上。
 hidden = [
     'win_theme',
     'win_title',
+    'win_guard',
     # app.py 走 _load_signin() 按路径加载 signin.py，没有字面量 import，
     # 静态分析看不到它——必须显式声明，否则它内部的依赖
     # （plistlib / ntpath / winreg）一个都不会被打包。
@@ -45,12 +48,6 @@ hidden = [
     'webview.platforms.winforms',
     'clr',
     'pythonnet',
-]
-
-datas = [
-    (ASSETS, 'assets'),
-    (os.path.join(DEMOS, 'win_theme.py'), '.'),
-    (os.path.join(DEMOS, 'win_title.py'), '.'),
 ]
 
 a = Analysis(
@@ -68,7 +65,8 @@ a = Analysis(
     runtime_hooks=[],
     excludes=[
         'tkinter', 'unittest', 'pydoc_data',
-        'matplotlib', 'numpy', 'scipy', 'pandas',      # kivy 遗留依赖
+        # 已放弃的 GUI 实验方案依赖，排除以控制体积
+        'matplotlib', 'numpy', 'scipy', 'pandas',
         'kivy', 'sdl2', 'OpenGL',
     ],
     noarchive=False,
@@ -86,7 +84,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='WorkBuddyConsole',
+    name='Auto-claim-dashboard',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

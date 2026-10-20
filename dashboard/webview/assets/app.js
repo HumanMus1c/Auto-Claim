@@ -413,6 +413,7 @@ function renderCalendar(d) {
   const first = new Date(y, m - 1, 1);
   const days = new Date(y, m, 0).getDate();
   const lead = first.getDay();                  // 周日为 0
+  const rows = Math.ceil((lead + days) / 7);    // 当月实际占用的周数
   const todayStr = null;                        // 稍后用今天（服务端无该字段）
 
   const set = new Set(dates.map((s) => String(s).slice(8, 10)));
@@ -430,6 +431,7 @@ function renderCalendar(d) {
 
   const grid = document.createElement('div');
   grid.className = 'cal-grid';
+  grid.style.setProperty('--cal-rows', rows);
   for (let i = 0; i < lead; i++) {
     const ph = document.createElement('i');
     grid.appendChild(ph);
@@ -542,6 +544,17 @@ function runSeries(actions) {
 
 /* ---------- 动作按钮 ---------- */
 
+// 按钮区下方的提示行：默认文案来自 HTML；悬停/聚焦某个命令按钮时改成
+// 展示它的完整功能描述，移开（或失焦）后还原。原生 tooltip（title）保留
+// 作为兜底，但描述较长，只有这行能一眼看全。
+const DEFAULT_HINT = $('actionHint').textContent;
+
+function showHint(text) {
+  const h = $('actionHint');
+  h.textContent = text || DEFAULT_HINT;
+  h.classList.toggle('show', !!text);
+}
+
 function buildActions(list) {
   const box = $('actGroup');
   box.innerHTML = '';
@@ -555,6 +568,10 @@ function buildActions(list) {
     b.id = 'act-' + a.key;
     b.title = a.desc;
     b.innerHTML = esc(a.label) + ' <code>' + esc(a.key) + '</code>';
+    b.addEventListener('mouseenter', () => showHint(a.desc));
+    b.addEventListener('mouseleave', () => showHint());
+    b.addEventListener('focus', () => showHint(a.desc));
+    b.addEventListener('blur', () => showHint());
     b.addEventListener('click', () => onActionClick(a, b));
     box.appendChild(b);
     return b;
