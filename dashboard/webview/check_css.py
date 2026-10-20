@@ -20,11 +20,12 @@ CSS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "style.
 REQUIRED = [
     ".btn", ".btn:hover:not(:disabled)", ".btn code", ".btn.primary",
     ".btn.primary:hover:not(:disabled)", ".btn.act", ".btn.confirm",
-    ".btn.ghost",
+    ".btn.ghost", ".btn.danger",
     ".act-group", ".act-sep", ".actions",
     ".card", ".card-value", ".cards",
     ".tasklist", ".task", ".task-title", ".bar", ".tag",
     ".kv", ".cal", ".cal-day", ".cal-grid",
+    ".pane-service", ".svc-pill", ".svc-task", ".svc-actions", ".svc-log",
     ".log .line", ".pane", ".pane-head", ".row2",
     ".topbar", ".brand", ".badge", ".meta",
     ".tabs", ".tab", ".mini-btn", ".hint", ".icon-btn",

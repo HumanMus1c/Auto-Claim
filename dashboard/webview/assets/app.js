@@ -623,6 +623,292 @@ function resetPending() {
   PENDING = null;
 }
 
+/* ---------- 脚本服务（Windows 计划任务） ---------- */
+
+const SVC_STATE_LABEL = {
+  Ready: '就绪',
+  Running: '运行中',
+  Disabled: '已停用',
+  Queued: '排队中',
+  Unknown: '未知',
+};
+
+const SVC_BUTTONS = {
+  install: 'btnSvcInstall',
+  uninstall: 'btnSvcUninstall',
+  enable: 'btnSvcEnable',
+  disable: 'btnSvcDisable',
+  run: 'btnSvcRun',
+  stop: 'btnSvcStop',
+};
+
+const SVC_ACTION_LABEL = {
+  install: '安装 / 修复',
+  uninstall: '卸载',
+  enable: '启用',
+  disable: '停用',
+  run: '立即运行',
+  stop: '停止',
+};
+
+// 只有会改变任务注册状态的操作需要二次确认；启用/停用/运行/停止可随时恢复
+const SVC_CONFIRM = { install: true, uninstall: true };
+
+let SERVICE = null;
+let SVC_BUSY = false;
+let SVC_PENDING = null;
+let SVC_TIMER = null;
+let SVC_REFRESHING = false;
+let SVC_REFRESH_SEQ = 0;
+
+function svcResultText(code) {
+  if (code === null || code === undefined || code === '') return '—';
+  if (code === 0) return '成功';
+  const known = {
+    267009: '正在运行',
+    267010: '已禁用',
+    267011: '尚未运行',
+    267014: '已终止',
+  };
+  if (known[code]) return known[code];
+  let n = Number(code);
+  if (!Number.isFinite(n)) return String(code);
+  if (n < 0) n = n >>> 0;
+  return '0x' + n.toString(16).toUpperCase();
+}
+
+function makeServiceNode(t) {
+  const el = document.createElement('div');
+  el.className = 'svc-task';
+
+  const top = document.createElement('div');
+  top.className = 'svc-task-top';
+
+  const name = document.createElement('span');
+  name.className = 'svc-name';
+  name.textContent = t.name;
+  name.title = t.action || t.name;
+
+  const tag = document.createElement('span');
+  let stateText = '未安装';
+  let stateCls = 'locked';
+  if (t.installed) {
+    stateText = SVC_STATE_LABEL[t.state] || t.state || '未知';
+    stateCls = t.state === 'Running' ? 'buddy' : (t.enabled ? 'claimed' : 'locked');
+  }
+  tag.className = 'tag ' + stateCls;
+  tag.textContent = stateText;
+
+  top.append(name, tag);
+  el.appendChild(top);
+
+  const line1 = document.createElement('p');
+  line1.className = 'svc-line';
+  line1.textContent = (t.when || '—') + ' · ' + (t.what || '');
+  el.appendChild(line1);
+
+  const line2 = document.createElement('p');
+  line2.className = 'svc-line';
+  if (t.installed) {
+    const parts = ['上次 ' + (t.last_run || '尚未运行'),
+                   '结果 ' + svcResultText(t.last_result)];
+    if (t.next_run) parts.push('下次 ' + t.next_run);
+    line2.textContent = parts.join(' · ');
+    line2.title = [t.action, t.last_run, t.next_run].filter(Boolean).join('\n');
+  } else {
+    line2.textContent = '点击「安装 / 修复」创建此任务';
+  }
+  el.appendChild(line2);
+  return el;
+}
+
+function renderService(s) {
+  SERVICE = s || {};
+  const supported = SERVICE.supported !== false;
+  const ok = SERVICE.ok !== false;
+  const tasks = SERVICE.tasks || [];
+
+  const pill = $('svcState');
+  let pillText = '未检测';
+  let pillKind = '';
+  if (!supported) {
+    pillText = '仅 Windows';
+    pillKind = 'warn';
+  } else if (!ok) {
+    pillText = '读取失败';
+    pillKind = 'err';
+  } else if (SERVICE.running) {
+    pillText = '运行中';
+    pillKind = 'busy';
+  } else if (SERVICE.installed && SERVICE.enabled) {
+    pillText = '已启用';
+    pillKind = 'ok';
+  } else if (SERVICE.installed) {
+    const enabledCount = tasks.filter((t) => t.installed && t.enabled).length;
+    pillText = enabledCount ? '部分停用' : '已停用';
+    pillKind = 'warn';
+  } else if (SERVICE.installed_count) {
+    pillText = '部分安装';
+    pillKind = 'warn';
+  } else {
+    pillText = '未安装';
+  }
+  pill.textContent = pillText;
+  pill.className = 'svc-pill ' + pillKind;
+
+  const summary = $('svcSummary');
+  if (!supported) {
+    summary.textContent = '脚本服务使用 Windows 计划任务，当前平台不支持。';
+  } else if (!ok) {
+    summary.textContent = '状态读取失败：' + (SERVICE.error || '未知错误');
+  } else if (!SERVICE.installed_count) {
+    summary.textContent = '尚未安装后台任务。点击「安装 / 修复」创建两个计划任务；'
+      + '任务由 Windows 托管，不需要保持控制台打开。';
+  } else if (SERVICE.installed && SERVICE.enabled) {
+    summary.textContent = '两个计划任务均已安装并启用'
+      + (SERVICE.next_run ? '，下次运行 ' + SERVICE.next_run : '')
+      + '。';
+  } else if (SERVICE.installed) {
+    const enabledCount = tasks.filter((t) => t.installed && t.enabled).length;
+    summary.textContent = enabledCount
+      ? '两个计划任务均已安装，但有任务被停用；点击「启用」恢复按计划运行。'
+      : '两个计划任务均已安装，但当前被停用；启用后会按计划自动运行。';
+  } else {
+    summary.textContent = '仅安装了 ' + SERVICE.installed_count
+      + ' / 2 个计划任务，点击「安装 / 修复」补齐。';
+  }
+
+  const box = $('svcTasks');
+  box.innerHTML = '';
+  tasks.forEach((t) => box.appendChild(makeServiceNode(t)));
+
+  const log = $('svcLog');
+  if (SERVICE.log && SERVICE.log.line) {
+    log.textContent = '最近日志 ' + (SERVICE.log.at || '') + ' · ' + SERVICE.log.line;
+    log.title = (SERVICE.log.path || '') + '\n' + SERVICE.log.line;
+  } else {
+    log.textContent = '';
+    log.title = '';
+  }
+
+  const installed = !!SERVICE.installed_count;
+  const allEnabled = !!SERVICE.installed && !!SERVICE.enabled;
+  const anyEnabled = tasks.some((t) => t.installed && t.enabled);
+  const canUse = supported && ok && !SVC_BUSY;
+
+  $('btnSvcInstall').disabled = !canUse;
+  $('btnSvcEnable').disabled = !canUse || !installed || allEnabled;
+  $('btnSvcDisable').disabled = !canUse || !installed || !anyEnabled;
+  $('btnSvcRun').disabled = !canUse || !installed || !anyEnabled;
+  $('btnSvcStop').disabled = !canUse || !SERVICE.running;
+  $('btnSvcUninstall').disabled = !canUse || !installed;
+  $('btnSvcRefresh').disabled = SVC_BUSY;
+}
+
+function setServiceBusy(on) {
+  SVC_BUSY = on;
+  const pill = $('svcState');
+  if (on) {
+    pill.textContent = '处理中…';
+    pill.className = 'svc-pill busy';
+  }
+  Object.keys(SVC_BUTTONS).forEach((key) => {
+    if (on) $(SVC_BUTTONS[key]).disabled = true;
+  });
+  $('btnSvcRefresh').disabled = on;
+  if (!on) renderService(SERVICE || {});
+}
+
+function resetSvcPending() {
+  if (!SVC_PENDING) return;
+  const btn = $(SVC_BUTTONS[SVC_PENDING]);
+  if (btn) {
+    btn.classList.remove('confirm');
+    if (btn.dataset.label) {
+      btn.textContent = btn.dataset.label;
+      delete btn.dataset.label;
+    }
+  }
+  SVC_PENDING = null;
+}
+
+function scheduleServicePoll() {
+  if (SVC_TIMER) clearTimeout(SVC_TIMER);
+  const delay = (SERVICE && SERVICE.running) ? 15000 : 60000;
+  SVC_TIMER = setTimeout(() => {
+    if (document.hidden) {
+      scheduleServicePoll();
+      return;
+    }
+    refreshService(true).finally(scheduleServicePoll);
+  }, delay);
+}
+
+function refreshService(silent) {
+  if (SVC_BUSY || SVC_REFRESHING) return Promise.resolve();
+  SVC_REFRESHING = true;
+  const seq = ++SVC_REFRESH_SEQ;
+  $('btnSvcRefresh').disabled = true;
+  return call('service_status')
+    .then((s) => {
+      if (seq !== SVC_REFRESH_SEQ) return;
+      renderService(s);
+      if (!silent && s && s.ok === false) {
+        appendLog('读取脚本服务状态失败：' + (s.error || '未知错误'), 'err');
+      }
+    })
+    .catch((e) => {
+      if (seq !== SVC_REFRESH_SEQ) return;
+      renderService({ supported: true, ok: false, error: String(e), tasks: [] });
+      appendLog('读取脚本服务状态异常：' + e, 'err');
+    })
+    .finally(() => {
+      SVC_REFRESHING = false;
+      if (seq === SVC_REFRESH_SEQ) $('btnSvcRefresh').disabled = SVC_BUSY;
+    });
+}
+
+function serviceAction(action) {
+  if (SVC_BUSY) return;
+  const btn = $(SVC_BUTTONS[action]);
+  const label = SVC_ACTION_LABEL[action] || action;
+
+  if (SVC_CONFIRM[action] && SVC_PENDING !== action) {
+    resetSvcPending();
+    SVC_PENDING = action;
+    btn.dataset.label = btn.textContent;
+    btn.classList.add('confirm');
+    btn.textContent = '确认' + label + '？';
+    appendLog('待确认：' + label + '脚本服务（再次点击按钮执行）', 'warn');
+    setTimeout(() => { if (SVC_PENDING) resetSvcPending(); }, 8000);
+    return;
+  }
+
+  resetSvcPending();
+  setServiceBusy(true);
+  appendLog('脚本服务：' + label + '…', 'cmd');
+
+  call('service_action', action)
+    .then((r) => {
+      if (r && r.ok) {
+        appendLog('脚本服务：' + (r.message || (label + '完成')), 'ok');
+      } else {
+        appendLog('脚本服务：' + ((r && (r.error || r.message)) || '操作失败'), 'err');
+      }
+      if (r && r.status) {
+        SVC_REFRESH_SEQ++;          // 丢弃操作前发出的旧状态响应
+        renderService(r.status);
+      } else {
+        return refreshService(true);
+      }
+    })
+    .catch((e) => appendLog('脚本服务调用失败：' + e, 'err'))
+    .finally(() => {
+      SVC_BUSY = false;
+      refreshService(true).finally(() => setServiceBusy(false));
+    });
+}
+
 /* ---------- 启动 ---------- */
 
 async function boot(api) {
@@ -670,6 +956,11 @@ async function boot(api) {
   appendLog('可用命令：' + state.actions.map((a) => a.key).join(' / '), 'meta');
   setBadge('就绪', 'ok');
 
+  // 脚本服务状态独立刷新：计划任务可能被系统或其他工具改动。
+  // 空闲时 60 秒一次，任务运行中 15 秒一次；操作后也会立即刷新。
+  refreshService(true);
+  scheduleServicePoll();
+
   // 启动即刷新：缓存只是"先有个数看"，真实数据以这次查询为准。
   // doctor 只跑后端、不暴露按钮，用来填充「凭据格式」那张卡。
   if (info.signin_exists) {
@@ -695,6 +986,11 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btnCopy').addEventListener('click', copyLog);
   $('themeToggle').addEventListener('click', toggleTheme);
   $('btnTasks').addEventListener('click', () => loadTasks(false));
+
+  $('btnSvcRefresh').addEventListener('click', () => refreshService(false));
+  Object.keys(SVC_BUTTONS).forEach((action) => {
+    $(SVC_BUTTONS[action]).addEventListener('click', () => serviceAction(action));
+  });
 
   $('taskTabs').addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');

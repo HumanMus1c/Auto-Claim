@@ -26,9 +26,10 @@ datas += [
     (os.path.join(DASHBOARD, 'win_theme.py'), '.'),
     (os.path.join(DASHBOARD, 'win_title.py'), '.'),
     (os.path.join(DASHBOARD, 'win_guard.py'), '.'),
+    (os.path.join(DASHBOARD, 'win_service.py'), '.'),
 ]
 
-# win_theme / win_title / win_guard 是在函数体内 import 的，
+# win_theme / win_title / win_guard / win_service 是在函数体内 import 的，
 # 且不在 pathex 里，静态分析抓不到。必须显式声明；否则冻结后 sys.path 变了，
 # 就 ModuleNotFoundError。它们和 app.py 并排放进包内，
 # HERE（冻结时= sys._MEIPASS）本就在 sys.path 上。

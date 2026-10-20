@@ -66,7 +66,8 @@ def pre_checks():
         failed.append("style.css 缺关键选择器")
 
     if run("单元测试", [PY, "-X", "utf8", "-m", "unittest",
-                        "test_locate_signin", "test_win_guard"]) != 0:
+                        "test_locate_signin", "test_win_guard",
+                        "test_win_service"]) != 0:
         failed.append("单元测试未通过")
 
     return failed
@@ -100,7 +101,8 @@ def post_check():
         (os.path.join(HERE, "assets", "style.css"), "assets/style.css"),
         (SPEC, SPEC),
     ]
-    for name in ("win_theme.py", "win_title.py", "win_guard.py"):
+    for name in ("win_theme.py", "win_title.py", "win_guard.py",
+                 "win_service.py"):
         paths.append((os.path.join(DASHBOARD, name), "dashboard/" + name))
     for path, label in paths:
         if os.path.isfile(path) and os.path.getmtime(path) > exe_mtime + 1:

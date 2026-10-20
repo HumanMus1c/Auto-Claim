@@ -24,7 +24,7 @@ REPO  = os.path.dirname(DASHBOARD)     # 仓库根：signin.py 在这里
 | `Analysis` 入口 | **绝对路径**。曾用相对 `'app.py'`，在别的 cwd 下执行会解析到错误文件，打出来的 exe 跑旧代码且不报错 |
 | `pathex` | `[HERE, REPO]`。仓库根必须在里面，否则 PyInstaller 找不到 `signin.py`，也就不会分析它内部的 import |
 | `hiddenimports` | `win_theme`、`win_title`、`win_guard`、`signin`、`plistlib`、`ntpath`、`winreg`、`webview.platforms.edgechromium`、`webview.platforms.winforms`、`clr`、`pythonnet` |
-| `datas` | 逐文件列出 assets，并跳过 `run.log` / `debug.log`；`win_theme.py` / `win_title.py` / `win_guard.py` 以数据文件放在包根 |
+| `datas` | 逐文件列出 assets，并跳过 `run.log` / `debug.log`；`win_theme.py` / `win_title.py` / `win_guard.py` / `win_service.py` 以数据文件放在包根 |
 | `excludes` | `tkinter`、`unittest`、`pydoc_data`、`matplotlib`、`numpy`、`scipy`、`pandas`、`kivy`、`sdl2`、`OpenGL` |
 | `console` | `False`（`--windowed`），不弹终端窗口 |
 
@@ -109,7 +109,7 @@ ENV = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
 ## 产物
 
 ```text
-Auto-claim-dashboard.exe    约 14.9 MB    2026-10-19 23:43
+Auto-claim-dashboard.exe    约 15.0 MB    2026-10-20 12:07
 ```
 
 参照 `signin.py` 放在仓库根目录，可单独拷走（同目录需有 `signin.py`）。

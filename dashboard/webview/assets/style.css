@@ -256,6 +256,129 @@ main {
 /* 悬停/聚焦命令按钮时，提示行换成该按钮的完整描述：调亮到正文色，以示切换 */
 .hint.show { color: var(--text); }
 
+/* ---------- 脚本服务 ---------- */
+
+/* 与云端任务一样固定高度：主区是滚动容器，不能让它被压扁 */
+.pane-service { flex: 0 0 auto; }
+
+.svc-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.svc-pill {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  background: var(--surface);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+.svc-pill.ok {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent);
+}
+.svc-pill.warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+}
+.svc-pill.err {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+}
+.svc-pill.busy {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, transparent);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+.service-body {
+  padding: 10px 14px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.svc-summary {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.svc-tasks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+.svc-task {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  border: 1px solid transparent;
+  min-width: 0;
+}
+.svc-task:hover { border-color: var(--border); }
+
+.svc-task-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.svc-name {
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.svc-line {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.svc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.svc-actions .btn {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+.svc-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.svc-log {
+  margin: 0;
+  padding-top: 7px;
+  border-top: 1px dashed var(--border);
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.svc-log:empty { display: none; }
+
 /* ---------- 云端任务 ---------- */
 
 .tabs {
@@ -475,6 +598,16 @@ main {
   background: var(--surface-2);
 }
 
+/* 卸载等破坏性操作：保留 ghost 的轻量感，但用错误色标出 */
+.btn.danger {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+}
+.btn.danger:hover:not(:disabled) {
+  color: var(--err);
+  background: color-mix(in srgb, var(--err) 10%, var(--surface));
+}
+
 .readonly-note {
   font-size: 11.5px;
   color: var(--text-dim);
@@ -579,7 +712,12 @@ main {
   cursor: pointer;
   transition: background .12s, color .12s;
 }
-.mini-btn:hover { background: var(--accent); color: var(--accent-fg); border-color: transparent; }
+.mini-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-fg);
+  border-color: transparent;
+}
+.mini-btn:disabled { opacity: .5; cursor: default; }
 .mini-btn.done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
 
 /* ---------- 日志 ---------- */

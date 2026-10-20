@@ -78,7 +78,32 @@
   </section>
   <p class="hint" id="actionHint">只读查询不会改动服务端状态；带「写操作」标记的会真实领取。悬停按钮可查看完整说明。</p>
 
-  <!-- ③ 云端任务（独占一行） -->
+  <!-- ③ 脚本服务（Windows 计划任务） -->
+  <section class="pane pane-service">
+    <div class="pane-head">
+      <h2>脚本服务</h2>
+      <div class="svc-head">
+        <span class="svc-pill" id="svcState">检测中…</span>
+        <button class="mini-btn" id="btnSvcRefresh" title="重新读取计划任务状态" disabled>刷新状态</button>
+      </div>
+    </div>
+    <div class="service-body">
+      <p class="svc-summary" id="svcSummary">正在读取计划任务状态…</p>
+      <div class="svc-tasks" id="svcTasks"></div>
+      <div class="svc-actions">
+        <button class="btn primary" id="btnSvcInstall" title="注册或更新两个后台计划任务" disabled>安装 / 修复</button>
+        <button class="btn ghost" id="btnSvcEnable" title="恢复计划任务按计划自动运行" disabled>启用</button>
+        <button class="btn ghost" id="btnSvcDisable" title="保留任务，但暂停自动运行" disabled>停用</button>
+        <button class="btn ghost" id="btnSvcRun" title="立即运行签到任务（含成长中心）" disabled>立即运行</button>
+        <button class="btn ghost" id="btnSvcStop" title="结束正在运行的计划任务" disabled>停止</button>
+        <button class="btn ghost danger" id="btnSvcUninstall" title="删除两个后台计划任务" disabled>卸载</button>
+        <span class="svc-hint">由 Windows 任务计划程序托管，无需保持控制台打开</span>
+      </div>
+      <p class="svc-log" id="svcLog"></p>
+    </div>
+  </section>
+
+  <!-- ④ 云端任务（独占一行） -->
   <section class="pane pane-tasks">
     <div class="pane-head">
       <h2>云端任务</h2>
@@ -92,7 +117,7 @@
     </div>
   </section>
 
-  <!-- ④ 签到状态 + 本月签到（同一行） -->
+  <!-- ⑤ 签到状态 + 本月签到（同一行） -->
   <section class="row2">
     <div class="pane pane-cal">
       <div class="pane-head"><h2>签到状态</h2></div>
@@ -114,7 +139,7 @@
     </div>
   </section>
 
-  <!-- ⑤ 运行日志（最后独占整行） -->
+  <!-- ⑥ 运行日志（最后独占整行） -->
   <section class="pane pane-log">
     <div class="pane-head">
       <h2>运行日志</h2>

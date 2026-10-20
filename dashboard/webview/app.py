@@ -18,8 +18,6 @@ import sys
 import threading
 import time
 
-import webview
-
 # _locate_signin() 走过的候选路径，失败时供界面展示排查线索
 SEARCHED = []
 
@@ -98,6 +96,32 @@ SIGNIN = _locate_signin()
 _REPO = os.path.dirname(SIGNIN)
 if os.path.isdir(_REPO) and _REPO not in sys.path:
     sys.path.insert(0, _REPO)
+
+
+def _signin_log_path():
+    """signin.py 的默认日志位置；环境变量优先，规则与 emit() 一致。"""
+    override = os.environ.get("WORKBUDDY_SIGNIN_LOG")
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(SIGNIN)), "signin.log")
+
+
+def _service_runner():
+    """计划任务要启动的命令：可执行文件 + 固定前置参数。
+
+    打包后直接运行本 exe 的 --service 模式，任务不依赖系统 Python；
+    源码运行时则用 pythonw.exe 跑 app.py，避免弹出控制台窗口。
+    """
+    if getattr(sys, "frozen", False):
+        return sys.executable, ["--service"]
+
+    exe = os.path.abspath(sys.executable)
+    folder, name = os.path.split(exe)
+    if name.lower() == "python.exe":
+        pythonw = os.path.join(folder, "pythonw.exe")
+        if os.path.isfile(pythonw):
+            exe = pythonw
+    return exe, [os.path.abspath(__file__), "--service"]
 
 
 def icon_path():
@@ -249,6 +273,8 @@ def _probe(window):
           "credType:(document.getElementById('vCred')||{}).textContent||'',"
           "todo:(document.getElementById('cntTodo')||{}).textContent||'',"
           "done:(document.getElementById('cntDone')||{}).textContent||'',"
+          "svc:(document.getElementById('svcState')||{}).textContent||'',"
+          "svcInstalled:(document.getElementById('svcSummary')||{}).textContent||'',"
           "tasks:(document.getElementById('tasklist')||{}).childElementCount||0,"
           "calSigned:document.querySelectorAll('#cal .on').length,"
           "logLines:(document.getElementById('log')||{}).childElementCount||0,"
@@ -574,6 +600,58 @@ class Api:
         finally:
             _SIGNIN_LOCK.release()
 
+    # ---------- 脚本服务（Windows 计划任务） ----------
+
+    def service_status(self):
+        """读取后台计划任务的安装、启用、运行与最近执行状态。"""
+        try:
+            import win_service
+            return win_service.status(_signin_log_path())
+        except Exception as exc:
+            return {
+                "supported": os.name == "nt",
+                "ok": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "tasks": [],
+                "installed": False,
+                "installed_count": 0,
+                "enabled": False,
+                "running": False,
+                "next_run": None,
+                "last_run": None,
+                "log": None,
+            }
+
+    def service_action(self, action):
+        """安装/卸载/启用/停用/立即运行/停止后台计划任务。
+
+        只接受固定动作名；具体任务名、触发器与命令全部在 win_service 里定义，
+        前端无法借这个入口执行任意命令。
+        """
+        allowed = ("install", "uninstall", "enable", "disable", "run", "stop")
+        if action not in allowed:
+            return {"ok": False, "error": "未知服务操作：%s" % action}
+
+        try:
+            import win_service
+            if action == "install":
+                if not os.path.isfile(SIGNIN):
+                    result = {"ok": False, "error": "未找到 signin.py，无法安装计划任务"}
+                else:
+                    runner, prefix = _service_runner()
+                    result = win_service.install(
+                        runner, prefix, workdir=os.path.dirname(SIGNIN))
+            else:
+                result = win_service.action(action)
+        except Exception as exc:
+            result = {"ok": False,
+                      "error": "%s: %s" % (type(exc).__name__, exc)}
+
+        result["status"] = self.service_status()
+        text = result.get("message") or result.get("error") or "操作完成"
+        _append_log("脚本服务 %s: %s" % (action, text))
+        return result
+
     def system_theme(self):
         """把注册表里读到的亮/暗与强调色交给前端做初始配色。"""
         try:
@@ -622,7 +700,41 @@ class Api:
             pass  # 窗口已关闭
 
 
+def _service_main(argv):
+    """计划任务入口：``--service silent`` / ``silent-poll``。
+
+    由 win_service 注册的计划任务调用。直接复用 Api._invoke()，不创建窗口，
+    也不需要 pywebview；silent 类命令的结果由 signin.emit() 写进 signin.log。
+    """
+    action = argv[0] if argv else ""
+    allowed = ("silent", "silent-poll", "silent-growth")
+    if action not in allowed:
+        _append_log("[service] 未知或缺少动作：%r（可用：%s）"
+                    % (action, " / ".join(allowed)))
+        return 2
+
+    try:
+        code, stdout, stderr = Api._invoke(action)
+    except Exception as exc:
+        import traceback
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        _append_log("[service] %s 启动失败：%s" % (action, detail))
+        try:
+            with open(_crash_path(), "a", encoding="utf-8") as fh:
+                fh.write("[service %s] %s\n" % (action, detail))
+        except Exception:
+            pass
+        return 1
+
+    # silent 正常时 stdout 为空；异常或加载失败才会有内容，落盘便于事后追溯。
+    for line in (stderr or "").splitlines() + (stdout or "").splitlines():
+        _append_log("[service] " + line)
+    return code if isinstance(code, int) else 1
+
+
 def main():
+    import webview
+
     _trace("main 进入: HERE=%s ASSETS=%s index=%s SIGNIN=%s"
            % (HERE, ASSETS,
               os.path.isfile(os.path.join(ASSETS, "index.html")), SIGNIN))
@@ -711,6 +823,10 @@ def main():
 
 
 if __name__ == "__main__":
+    # 计划任务走无窗口服务分支，不创建 WebView2，也不触发单实例锁。
+    if len(sys.argv) > 1 and sys.argv[1] == "--service":
+        sys.exit(_service_main(sys.argv[2:]))
+
     # edgechromium 后端会接管 stdout/stderr，异常信息经常整个丢失。
     # 自建一份文件日志，出问题时至少还有痕迹。路径见 _crash_path()：
     # 绝不能写进 ASSETS（打包后那是临时解包目录，退出即删）。
