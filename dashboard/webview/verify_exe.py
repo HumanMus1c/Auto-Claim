@@ -18,12 +18,13 @@ EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-claim-dashboar
 FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 "service_status", "service_action",
                 "_growth_snapshot", "_growth_changes",
-                "acquire_single_instance", "UIWatchdog"]
+                "acquire_single_instance", "UIWatchdog",
+                "IconManager"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
 # 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。
 REQUIRED_ENTRIES = ["win_theme.py", "win_title.py", "win_guard.py",
-                    "win_service.py"]
+                    "win_service.py", "win_icon.py"]
 
 
 def main():

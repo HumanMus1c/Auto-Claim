@@ -59,6 +59,10 @@ def pre_checks():
     if run("JS 语法检查", ["node", "--check", js]) != 0:
         failed.append("app.js 语法错误")
 
+    js_test = os.path.join(HERE, "test_status_event.js")
+    if run("前端事件回归测试", ["node", js_test]) != 0:
+        failed.append("前端事件回归测试未通过")
+
     if run("重复代码检查", [PY, os.path.join(HERE, "check_dup.py")]) != 0:
         failed.append("存在重复代码块")
 
@@ -67,7 +71,7 @@ def pre_checks():
 
     if run("单元测试", [PY, "-X", "utf8", "-m", "unittest",
                         "test_locate_signin", "test_win_guard",
-                        "test_win_service"]) != 0:
+                        "test_win_service", "test_win_icon"]) != 0:
         failed.append("单元测试未通过")
 
     return failed
@@ -102,7 +106,7 @@ def post_check():
         (SPEC, SPEC),
     ]
     for name in ("win_theme.py", "win_title.py", "win_guard.py",
-                 "win_service.py"):
+                 "win_service.py", "win_icon.py"):
         paths.append((os.path.join(DASHBOARD, name), "dashboard/" + name))
     for path, label in paths:
         if os.path.isfile(path) and os.path.getmtime(path) > exe_mtime + 1:

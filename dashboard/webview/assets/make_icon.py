@@ -7,11 +7,15 @@
 
 输出：
   icon.svg        —— 界面用，stroke=currentColor，随亮/暗主题自动反色
-  icon.ico        —— exe 用，含 16/24/32/48/64/128/256 多尺寸
-  icon_*.png      —— 中间产物，便于人工核对
+  icon_light.ico  —— 浅色主题窗口/任务栏/托盘图标（深色线条）
+  icon_dark.ico   —— 深色主题窗口/任务栏/托盘图标（浅色线条）
+  icon.ico        —— exe 静态图标，深色底 + 白线条，在亮/暗文件管理器
+                     里都能看清（资源管理器不会替 exe 图标自动反色）
+  icon_preview.png—— 人工核对用的三套效果预览
 
 用 Pillow 直接描线（4 倍超采样后缩回，得到抗锯齿），
-所以不依赖 cairosvg / 浏览器。
+所以不依赖 cairosvg / 浏览器。每个尺寸单独绘制后再写入 ICO，
+避免 16px 由 256px 直接缩小导致线条糊成灰块。
 """
 
 import math
@@ -96,8 +100,8 @@ def rotated(cx, cy, w, h, r, deg):
 
 # ---------------------------------------------------------------- 绘制
 
-def draw(size, color):
-    """在透明底上画线条图标。"""
+def draw(size, color, background=None):
+    """画线条图标；background 不为空时先铺一层圆角方块底。"""
     s = size * SS
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     dr = ImageDraw.Draw(img)
@@ -114,8 +118,12 @@ def draw(size, color):
         for px, py in (pts if closed else pts[1:-1]):
             dr.ellipse([px - r, py - r, px + r, py + r], fill=color)
 
+    outline = rounded_rect_points(27, 27, 202, 202, 53)
+    if background is not None:
+        dr.polygon([(x * k, y * k) for x, y in outline], fill=background)
+
     # 外圈圆角方块
-    stroke(rounded_rect_points(27, 27, 202, 202, 53))
+    stroke(outline)
     # 动物头轮廓
     stroke(head_points())
     # 两只眼睛
@@ -125,12 +133,14 @@ def draw(size, color):
     return img.resize((size, size), Image.LANCZOS)
 
 
-def build_ico():
+def build_ico(filename, color, background=None):
     sizes = (16, 24, 32, 48, 64, 128, 256)
-    images = [draw(s, (0, 0, 0, 255)) for s in sizes]
-    path = os.path.join(HERE, "icon.ico")
+    images = [draw(s, color, background) for s in sizes]
+    path = os.path.join(HERE, filename)
+    # append_images 让每个尺寸都用自己绘制的结果，而不是拿 256px 缩。
     images[-1].save(path, format="ICO",
-                    sizes=[(s, s) for s in sizes])
+                    sizes=[(s, s) for s in sizes],
+                    append_images=images[:-1])
     return path
 
 
@@ -159,10 +169,11 @@ def main():
     with open(os.path.join(HERE, "icon.svg"), "w", encoding="utf-8") as f:
         f.write(SVG)
 
-    # 预览图：浅色底深色线 / 深色底浅色线，模拟自动反色
+    # 预览图：浅色底深色线 / 深色底浅色线，模拟运行期自动反色；
+    # 第三行是 exe 静态图标，左右各放一半亮/暗背景，核对两种主题下的可见度。
     strips = []
-    for bg, fg, tag in (((0xF3, 0xF3, 0xF3, 255), (0x1C, 0x1C, 0x1C, 255), "light"),
-                        ((0x20, 0x20, 0x20, 255), (0xF1, 0xF1, 0xF1, 255), "dark")):
+    for bg, fg in (((0xF3, 0xF3, 0xF3, 255), (0x1C, 0x1C, 0x1C, 255)),
+                   ((0x20, 0x20, 0x20, 255), (0xF1, 0xF1, 0xF1, 255))):
         sizes = (16, 24, 32, 48, 64, 128)
         gap = 12
         strip = Image.new("RGBA", (sum(sizes) + gap * (len(sizes) + 1), 128 + gap * 2), bg)
@@ -173,6 +184,15 @@ def main():
             x += s + gap
         strips.append(strip)
 
+    # 静态 exe 图标：同一枚图标压在两块底色上
+    app_icon = draw(128, (0xF1, 0xF1, 0xF1, 255), (0x1F, 0x1F, 0x1F, 255))
+    wide = sum((16, 24, 32, 48, 64, 128)) + 12 * 7
+    pair = Image.new("RGBA", (wide, 128 + 24), (0xF3, 0xF3, 0xF3, 255))
+    dark_half = Image.new("RGBA", (wide // 2, 128 + 24), (0x20, 0x20, 0x20, 255))
+    pair.paste(dark_half, (wide // 2, 0), dark_half)
+    pair.paste(app_icon, ((wide - 128) // 2, 12), app_icon)
+    strips.append(pair)
+
     sheet = Image.new("RGBA", (max(s.width for s in strips),
                                sum(s.height for s in strips)), (255, 255, 255, 255))
     y = 0
@@ -182,10 +202,16 @@ def main():
     preview = os.path.join(HERE, "icon_preview.png")
     sheet.save(preview)
 
-    ico = build_ico()
-    print("icon.svg      ->", os.path.join(HERE, "icon.svg"))
-    print("icon_preview  ->", preview)
-    print("icon.ico      ->", ico, "(%d bytes)" % os.path.getsize(ico))
+    light = build_ico("icon_light.ico", (0x1C, 0x1C, 0x1C, 255))
+    dark = build_ico("icon_dark.ico", (0xF1, 0xF1, 0xF1, 255))
+    static = build_ico("icon.ico", (0xF1, 0xF1, 0xF1, 255),
+                       (0x1F, 0x1F, 0x1F, 255))
+
+    print("icon.svg       ->", os.path.join(HERE, "icon.svg"))
+    print("icon_preview   ->", preview)
+    for path in (light, dark, static):
+        print("%-14s -> %s (%d bytes)"
+              % (os.path.basename(path), path, os.path.getsize(path)))
 
 
 if __name__ == "__main__":

@@ -226,6 +226,14 @@ function renderFromStatus(raw) {
   const d = unwrap(raw);
   if (!d) return;
 
+  // 失败/异常结果通常只有 result/report，没有签到字段。此时保留上一次
+  // 渲染的数据，不要把指标卡和签到详情清成「—」。streak_days 不算：
+  // 成长中心汇报里也有这个字段，正是它让 growth 结果被误当成签到状态。
+  const hasStatus = ['today_checked_in', 'today_credit', 'daily_credit',
+                     'credit', 'total_credits', 'checkin_dates',
+                     'week_progress'].some((k) => k in d);
+  if (!hasStatus) return;
+
   const checked = d.today_checked_in === true || d.result === 'ALREADY'
                || d.result === 'CLAIMED';
   const credit = firstNum(d.credit, d.today_credit, d.daily_credit);
@@ -283,6 +291,7 @@ const TASK_LABEL = {
 let TASKS = [];
 let TASK_TAB = 'todo';
 let GROWTH = null;
+let GROWTH_LOADING = false;
 
 function renderTasks() {
   const box = $('tasklist');
@@ -620,11 +629,15 @@ function renderGrowth(data, at) {
 }
 
 function loadGrowth(silent) {
+  if (GROWTH_LOADING) return;
+  GROWTH_LOADING = true;
   const btn = $('btnGrowth');
+  const paneBtn = $('btnGrowthRefresh');
   if (btn) {
     btn.disabled = true;
     btn.textContent = '刷新中…';
   }
+  if (paneBtn) paneBtn.disabled = true;
   call('growth')
     .then((r) => {
       if (!r || !r.ok) {
@@ -645,10 +658,12 @@ function loadGrowth(silent) {
     })
     .catch((e) => appendLog('刷新成长中心异常：' + e, 'err'))
     .finally(() => {
+      GROWTH_LOADING = false;
       if (btn) {
         btn.disabled = false;
         btn.textContent = '刷新成长中心';
       }
+      if (paneBtn) paneBtn.disabled = BUSY;
     });
 }
 
@@ -734,17 +749,28 @@ function renderCalendar(d) {
 
 /* ---------- 后端事件 ---------- */
 
+// 只有这些命令的输出是签到状态结构。growth 的输出是成长中心汇报
+// （report / energy / streak_days…），字段并不完整；若交给 renderFromStatus，
+// 顶部指标卡和签到详情会被覆盖成「—」。
+const STATUS_ACTIONS = ['status', 'auto', 'claim', 'all'];
+
 window.__onBackend = function (kind, data) {
   if (kind === 'log') {
     appendLog(data);
+
+  } else if (kind === 'theme') {
+    // 系统主题变化：用户手动选过亮/暗时保留手动选择，否则跟随系统。
+    let saved = null;
+    try { saved = localStorage.getItem('wbTheme'); } catch (e) { /* 忽略 */ }
+    if (!saved) applyTheme(data.dark ? 'dark' : 'light');
 
   } else if (kind === 'done') {
     const p = data.payload;
     if (data.action === 'doctor') {
       renderFromDoctor(p);
-    } else if (p) {
+    } else if (p && STATUS_ACTIONS.indexOf(data.action) >= 0) {
       // status / auto / claim / all 的签到字段结构一致，统一走同一个渲染。
-      // 成长中心的细项不再单独出卡片，后端已把它们写进日志的摘要行。
+      // 成长中心的细项由 loadGrowth() 单独渲染。
       renderFromStatus(p);
     }
     setBusy(false);
@@ -768,12 +794,29 @@ window.__onBackend = function (kind, data) {
 let BUSY = false;
 let PENDING = null;      // 等待二次确认的动作 {key, btn}
 
+// 各面板标题栏上的刷新按钮；命令执行期间统一禁用，避免重复触发。
+const PANE_REFRESH_BUTTONS = ['btnGrowthRefresh', 'btnStatusRefresh', 'btnCalRefresh'];
+
+function setPaneRefreshDisabled(on) {
+  PANE_REFRESH_BUTTONS.forEach((id) => {
+    const b = $(id);
+    if (b) b.disabled = on || (id === 'btnGrowthRefresh' && GROWTH_LOADING);
+  });
+}
+
 function setBusy(on) {
   BUSY = on;
   document.querySelectorAll('#actGroup .btn').forEach((b) => {
     if (!b.classList.contains('confirm')) b.disabled = on;
   });
+  setPaneRefreshDisabled(on);
   setBadge(on ? '执行中…' : '就绪', on ? 'busy' : 'ok');
+}
+
+/** 标题栏刷新：重新查询签到状态（同时更新签到状态与本月签到两栏）。 */
+function refreshStatus() {
+  if (BUSY) return;
+  run('status');
 }
 
 function run(action) {
@@ -1278,6 +1321,9 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btnCopy').addEventListener('click', copyLog);
   $('themeToggle').addEventListener('click', toggleTheme);
   $('btnGrowth').addEventListener('click', () => loadGrowth(false));
+  $('btnGrowthRefresh').addEventListener('click', () => loadGrowth(false));
+  $('btnStatusRefresh').addEventListener('click', refreshStatus);
+  $('btnCalRefresh').addEventListener('click', refreshStatus);
 
   $('btnSvcRefresh').addEventListener('click', () => refreshService(false));
   Object.keys(SVC_BUTTONS).forEach((action) => {

@@ -23,8 +23,8 @@ REPO  = os.path.dirname(DASHBOARD)     # 仓库根：signin.py 在这里
 |---|---|
 | `Analysis` 入口 | **绝对路径**。曾用相对 `'app.py'`，在别的 cwd 下执行会解析到错误文件，打出来的 exe 跑旧代码且不报错 |
 | `pathex` | `[HERE, REPO]`。仓库根必须在里面，否则 PyInstaller 找不到 `signin.py`，也就不会分析它内部的 import |
-| `hiddenimports` | `win_theme`、`win_title`、`win_guard`、`signin`、`plistlib`、`ntpath`、`winreg`、`webview.platforms.edgechromium`、`webview.platforms.winforms`、`clr`、`pythonnet` |
-| `datas` | 逐文件列出 assets，并跳过 `run.log` / `debug.log`；`win_theme.py` / `win_title.py` / `win_guard.py` / `win_service.py` 以数据文件放在包根 |
+| `hiddenimports` | `win_theme`、`win_title`、`win_guard`、`win_icon`、`signin`、`plistlib`、`ntpath`、`winreg`、`webview.platforms.edgechromium`、`webview.platforms.winforms`、`clr`、`pythonnet` |
+| `datas` | 逐文件列出 assets，并跳过 `run.log` / `debug.log`；`win_theme.py` / `win_title.py` / `win_guard.py` / `win_service.py` / `win_icon.py` 以数据文件放在包根 |
 | `excludes` | `tkinter`、`unittest`、`pydoc_data`、`matplotlib`、`numpy`、`scipy`、`pandas`、`kivy`、`sdl2`、`OpenGL` |
 | `console` | `False`（`--windowed`），不弹终端窗口 |
 
@@ -57,9 +57,10 @@ datas = [
 |---|---|---|
 | 打包前 | `app.py` / `win_guard.py` 语法 | `python -m py_compile` |
 | 打包前 | `app.js` 语法 | `node --check` |
+| 打包前 | 前端事件回归（命令完成不清空无关数据） | `test_status_event.js` |
 | 打包前 | 函数体内重复代码 / 语法 | `check_dup.py`（AST） |
 | 打包前 | 样式表关键选择器齐全 | `check_css.py` |
-| 打包前 | 冻结路径 / 单实例逻辑 | `test_locate_signin.py`、`test_win_guard.py` |
+| 打包前 | 冻结路径 / 单实例 / 原生图标 | `test_locate_signin.py`、`test_win_guard.py`、`test_win_icon.py` |
 | 打包 | PyInstaller | `--clean --noconfirm` |
 | 打包后 | exe 里确实是本版代码 | `verify_exe.py` |
 | 打包后 | 资源与本地逐字节一致 | `verify_assets.py` |
@@ -88,7 +89,7 @@ code = marshal.loads(blob)
 
 ## verify_assets.py
 
-把 `assets/*`（`app.js` / `index.html` / `style.css` / `icon.ico`）从 exe 中取出，与磁盘上的同名文件逐个比对 SHA-256。前端资源同样是「改了没生效」的高发区。
+把 `assets/*`（`app.js` / `index.html` / `style.css` / `icon.ico` / `icon_light.ico` / `icon_dark.ico`）从 exe 中取出，与磁盘上的同名文件逐个比对 SHA-256。前端资源同样是「改了没生效」的高发区。
 
 ## 编码：一个会造成误报的坑
 

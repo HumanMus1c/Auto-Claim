@@ -107,7 +107,10 @@
   <section class="pane pane-tasks">
     <div class="pane-head">
       <h2>成长中心</h2>
-      <span class="growth-updated" id="growthUpdated">尚未刷新</span>
+      <div class="pane-tools">
+        <span class="growth-updated" id="growthUpdated">尚未刷新</span>
+        <button class="mini-btn" id="btnGrowthRefresh" title="重新拉取成长中心数据">刷新</button>
+      </div>
     </div>
     <div class="growth-overview" id="growthOverview">
       <p class="empty">点击「刷新成长中心」加载 Buddy 旅行、补登、连登兑换、抽奖与 Buddy 盲盒数据</p>
@@ -127,7 +130,10 @@
   <!-- ⑤ 签到状态 + 本月签到（同一行） -->
   <section class="row2">
     <div class="pane pane-cal">
-      <div class="pane-head"><h2>签到状态</h2></div>
+      <div class="pane-head">
+        <h2>签到状态</h2>
+        <button class="mini-btn" id="btnStatusRefresh" title="重新查询签到状态">刷新</button>
+      </div>
       <dl class="kv" id="kv">
         <div><dt>今日已签</dt><dd>—</dd></div>
         <div><dt>连签天数</dt><dd>—</dd></div>
@@ -139,7 +145,10 @@
     </div>
 
     <div class="pane pane-cal">
-      <div class="pane-head"><h2>本月签到</h2></div>
+      <div class="pane-head">
+        <h2>本月签到</h2>
+        <button class="mini-btn" id="btnCalRefresh" title="重新查询本月签到记录">刷新</button>
+      </div>
       <div class="cal" id="cal">
         <p class="empty">执行一次查询后显示</p>
       </div>

@@ -27,6 +27,7 @@ datas += [
     (os.path.join(DASHBOARD, 'win_title.py'), '.'),
     (os.path.join(DASHBOARD, 'win_guard.py'), '.'),
     (os.path.join(DASHBOARD, 'win_service.py'), '.'),
+    (os.path.join(DASHBOARD, 'win_icon.py'), '.'),
 ]
 
 # win_theme / win_title / win_guard / win_service 是在函数体内 import 的，
@@ -37,6 +38,7 @@ hidden = [
     'win_theme',
     'win_title',
     'win_guard',
+    'win_icon',
     # app.py 走 _load_signin() 按路径加载 signin.py，没有字面量 import，
     # 静态分析看不到它——必须显式声明，否则它内部的依赖
     # （plistlib / ntpath / winreg）一个都不会被打包。

@@ -38,10 +38,13 @@
 6. 签到状态 + 当月日历 —— 同一行
 7. 日志 —— 整行收尾，按级别着色带图标，支持一键复制
 
+除运行日志外，各面板标题栏右上角都提供「刷新」按钮：脚本服务重新读取计划任务状态，成长中心重新拉取概览与任务，签到状态 / 本月签到重新查询签到数据。
+
 外观细节：
 
 - **跟随系统主题与强调色**：`dashboard/win_theme.py` 读注册表 `HKCU\Software\Microsoft\Windows\DWM\ColorizationColor`；强调色按比例调整明度，避免嵌套元素上使用 CSS `filter` 产生副作用。
-- **图标自动反色**：纯线条 SVG，`stroke` 取 `currentColor`，只需设置容器的 `color`，无需维护亮/暗两套图。几何由 `assets/make_icon.py`（Pillow）同时生成 `icon.svg` 与 7 种尺寸的 `icon.ico`。
+- **图标自动反色**：界面内的纯线条 SVG 取 `currentColor`，只需设置容器的 `color`；窗口、任务栏和托盘图标由 `dashboard/win_icon.py` 根据 `AppsUseLightTheme` 在 `icon_light.ico`（深色线条）与 `icon_dark.ico`（浅色线条）之间切换，后台每 2 秒轮询一次，系统主题一变就同步。exe 静态图标 `icon.ico` 用深底白线，因为资源管理器不会替文件图标自动反色。几何与三套 ICO 由 `assets/make_icon.py`（Pillow）生成。
+- **托盘图标**：`win_icon.TrayIcon` 通过 `Shell_NotifyIcon` 创建，右键菜单提供「打开控制台 / 退出」；资源管理器重启后会在 `TaskbarCreated` 消息中自动重新注册。设 `WORKBUDDY_TRAY=0` 可临时关闭。
 - **标题栏**：`dashboard/win_title.py` 用 Win32 API 设置 Unicode 标题，绕开早期编码问题。
 
 ## 数据流
@@ -56,6 +59,8 @@
 1. `bootstrap()` —— 返回环境信息与上次缓存结果（含 `growth.json` 快照），界面先用缓存填充卡片，避免开场一片「—」
 2. 自动执行 `status`，随后 `doctor`
 3. 后台静默拉取一次成长中心，不打断启动；`auto` / `growth` 执行完成后自动重拉一次
+
+只有 `status` / `auto` / `claim` / `all` 完成后会更新顶部指标卡与签到详情；`growth` 的结果是另一套字段，只刷新成长中心，不会覆盖已有签到数据。失败或异常命令如果没有返回签到字段，也会保留上一次的显示值。
 
 成长中心走 `GET /v2/activity/growth/{tasks,buddy/travel/status,streak,heatmap,redeem/summary,lottery/chances,energy,buddy/quota}`，认证链路直接复用 `signin.py` 的 `find_auth_file` / `resolve_session` / `build_headers` / `get`，不另写一份 crypto。所有请求都是 GET；只有 `run('auto' / 'growth')` 会触发写操作。
 
@@ -160,6 +165,7 @@ $env:WORKBUDDY_DEBUG = "1"
 | `WORKBUDDY_WATCHDOG` | `0` 时关闭 UI 看门狗（仅用于调试） |
 | `WORKBUDDY_HANG_DUMP` | `0` 时卡死不抓 minidump（只写线程栈） |
 | `WORKBUDDY_DISABLE_GPU` | `1` 时给 WebView2 加 `--disable-gpu`，用于排查 DirectComposition 相关卡死 |
+| `WORKBUDDY_TRAY` | `0` 时不创建托盘图标（仅用于调试/截图） |
 
 ## 运行方式
 

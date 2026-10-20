@@ -25,7 +25,8 @@ def main():
     toc = archive.toc
 
     targets = ["assets\\app.js", "assets\\index.html",
-               "assets\\style.css", "assets\\icon.ico"]
+               "assets\\style.css", "assets\\icon.ico",
+               "assets\\icon_light.ico", "assets\\icon_dark.ico"]
 
     bad = []
     for name in targets:

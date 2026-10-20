@@ -124,10 +124,54 @@ def _service_runner():
     return exe, [os.path.abspath(__file__), "--service"]
 
 
-def icon_path():
-    """窗口图标。打包后随资源一起分发，路径走 ASSETS。"""
+def _system_dark():
+    """当前 Windows 应用主题；读不到时按浅色处理，不影响启动。"""
+    try:
+        import win_theme
+        return bool(win_theme.is_dark())
+    except Exception:
+        return False
+
+
+def icon_path(dark=None):
+    """启动时的窗口图标。
+
+    浅色主题用深色线条，深色主题用浅色线条；两者都缺失时退回 exe
+    里那张深底白线的静态图标。运行期的主题切换由 win_icon 负责。
+    """
+    if dark is None:
+        dark = _system_dark()
+    name = "icon_dark.ico" if dark else "icon_light.ico"
+    path = os.path.join(ASSETS, name)
+    if os.path.isfile(path):
+        return path
     path = os.path.join(ASSETS, "icon.ico")
     return path if os.path.isfile(path) else None
+
+
+def _native_handle(native):
+    """把 .NET IntPtr / WinForms Handle 转成整数 HWND。"""
+    hwnd = None
+    try:
+        handle = native.Handle
+        if hasattr(handle, "ToInt64"):
+            handle = handle.ToInt64()
+        hwnd = int(handle) or None
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        pass
+    return hwnd
+
+
+def _window_handle(window):
+    """从 pywebview 窗口对象取 HWND；拿不到时按进程找主窗口。"""
+    hwnd = _native_handle(getattr(window, "native", None))
+    if hwnd:
+        return hwnd
+    try:
+        import win_guard
+        return win_guard.find_own_window()
+    except Exception:
+        return None
 
 # 可在控制台里执行的命令。
 #
@@ -1209,6 +1253,41 @@ def main():
 
     api = Api()
 
+    # 原生图标（标题栏 / 任务栏 / 托盘）由 win_icon 在窗口显示后接管。
+    # 这里用可变容器保存，方便 finally 里统一清理，也避免闭包 nonlocal。
+    icon_holder = {"manager": None}
+
+    def _on_system_theme(dark):
+        """系统主题切换时顺手让前端跟随（手动选过主题的由 JS 忽略）。"""
+        _trace("Windows 主题切换: dark=%s" % dark)
+        api._push("theme", {"dark": bool(dark)})
+
+    def _start_native_icons():
+        """窗口有了 HWND 之后再挂载；失败只记日志，不影响界面。"""
+        if icon_holder["manager"] is not None:
+            return
+        try:
+            hwnd = _window_handle(window)
+            if not hwnd:
+                _trace("原生图标: 找不到窗口句柄，跳过")
+                return
+            import win_icon
+            manager = win_icon.IconManager(
+                hwnd,
+                ASSETS,
+                dark=_system_dark(),
+                tray=os.environ.get("WORKBUDDY_TRAY", "1") != "0",
+                on_theme=_on_system_theme,
+            )
+            if manager.start():
+                icon_holder["manager"] = manager
+                _trace("原生图标: hwnd=%#x dark=%s"
+                       % (hwnd, _system_dark()))
+            else:
+                _trace("原生图标: 启动失败（hwnd=%r）" % (hwnd,))
+        except Exception as exc:
+            _trace("原生图标主题跟随启动失败: %r" % (exc,))
+
     # WebView2 会对被遮挡/后台窗口节流 JS 定时器（最慢 1 分钟一次）。
     # 看门狗靠 5 秒一次的心跳判断 UI 是否还活着；一旦被节流，窗口只是
     # 被别的窗口盖住就会被误判成卡死。这三个开关在 WebView2 初始化前
@@ -1238,6 +1317,9 @@ def main():
     # _push 要靠它把结果送回前端
     api._window = window
 
+    # 窗口显示后才能拿到稳定的 HWND；事件回调在独立线程里执行。
+    window.events.shown += _start_native_icons
+
     # UI 看门狗：窗口创建后开始等主窗口，连续几次 WM_NULL 超时就退出，
     # 避免卡死的 WebView2 窗口把 DWM/任务栏一起拖住。
     if (win_guard is not None
@@ -1260,8 +1342,15 @@ def main():
     # pywebview 6.2.1 在这台机器上自动后端探测会失败（webview.guilib 一直是 None），
     # start() 表现为静默挂起、不建窗口也不报错，只能靠显式指定后端绕开。
     try:
-        webview.start(gui="edgechromium", debug=False, icon=icon_path())
+        webview.start(gui="edgechromium", debug=False,
+                      icon=icon_path(_system_dark()))
     finally:
+        manager = icon_holder["manager"]
+        if manager is not None:
+            try:
+                manager.stop()
+            except Exception as exc:
+                _trace("原生图标清理失败: %r" % (exc,))
         if watchdog is not None:
             watchdog.stop()
         if guard_handle is not None and win_guard is not None:

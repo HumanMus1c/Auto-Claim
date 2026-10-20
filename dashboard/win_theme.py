@@ -10,18 +10,27 @@ import winreg
 FALLBACK_ACCENT = (76, 194, 196)
 
 
-def _read_personalize():
+def _read_dark():
+    """只读应用亮/暗模式；找不到键时按浅色处理。"""
     try:
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                              r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
         with key:
             try:
-                dark = winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
+                return winreg.QueryValueEx(key, "AppsUseLightTheme")[0] == 0
             except FileNotFoundError:
-                dark = False
+                return False
     except OSError:
-        dark = False
-    return dark, _read_accent()
+        return False
+
+
+def is_dark():
+    """供图标主题轮询使用：只读一个值，不碰强调色。"""
+    return _read_dark()
+
+
+def _read_personalize():
+    return _read_dark(), _read_accent()
 
 
 def _read_accent():

@@ -28,7 +28,7 @@ REQUIRED = [
     ".growth-card-line", ".growth-subhead", ".growth-updated",
     ".kv", ".cal", ".cal-day", ".cal-grid",
     ".pane-service", ".svc-pill", ".svc-task", ".svc-actions", ".svc-log",
-    ".log .line", ".pane", ".pane-head", ".row2",
+    ".log .line", ".pane", ".pane-head", ".pane-tools", ".row2",
     ".topbar", ".brand", ".badge", ".meta",
     ".tabs", ".tab", ".mini-btn", ".hint", ".icon-btn",
 ]
