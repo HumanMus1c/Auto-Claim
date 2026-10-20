@@ -40,9 +40,120 @@ function esc(s) {
 
 /* ---------- 主题 ---------- */
 
+// 首屏配色已由 index.html 里的内联脚本在样式表之前完成，这里只负责
+// 运行期切换。本地记住的是「模式」而不是最终亮暗：system / light / dark。
+const THEME_KEY = 'wbTheme';
+const THEME_LABEL = { system: '跟随系统', light: '浅色', dark: '深色' };
+const THEME_GLYPH = { system: '◐', light: '☀', dark: '☾' };
+
+function systemPrefersDark() {
+  try {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches;
+  } catch (e) {
+    return false;
+  }
+}
+
+function savedThemeMode() {
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === 'light' || saved === 'dark' || saved === 'system') return saved;
+  } catch (e) { /* 忽略 */ }
+  return 'system';               // 没有本地选择时默认跟随系统
+}
+
 function applyTheme(mode) {
   state.theme = mode;
-  document.documentElement.dataset.theme = mode;
+  const root = document.documentElement;
+  root.dataset.theme = mode;
+  root.style.colorScheme = mode;
+}
+
+function syncThemeMenu() {
+  const menu = $('themeMenu');
+  if (!menu) return;
+  menu.querySelectorAll('[data-theme-mode]').forEach((item) => {
+    const active = item.dataset.themeMode === state.themeMode;
+    item.classList.toggle('active', active);
+    item.setAttribute('aria-checked', active ? 'true' : 'false');
+  });
+  const note = $('themeSystemState');
+  if (note) note.textContent = state.systemDark ? '当前深色' : '当前浅色';
+}
+
+function updateThemeButton() {
+  const btn = $('themeToggle');
+  if (!btn) return;
+  const mode = state.themeMode;
+  btn.textContent = THEME_GLYPH[mode] || THEME_GLYPH.system;
+  const text = mode === 'system'
+    ? '主题：跟随系统（当前' + THEME_LABEL[state.theme] + '）'
+    : '主题：' + THEME_LABEL[mode];
+  btn.title = text + '，点击选择';
+  btn.setAttribute('aria-label', btn.title);
+}
+
+/** 切换主题模式；system 模式使用最近一次读到的系统亮暗。 */
+function applyThemeMode(mode, options) {
+  options = options || {};
+  if (mode !== 'light' && mode !== 'dark') mode = 'system';
+  if (typeof options.systemDark === 'boolean') state.systemDark = options.systemDark;
+  state.themeMode = mode;
+  applyTheme(mode === 'system'
+    ? (state.systemDark ? 'dark' : 'light')
+    : mode);
+  document.documentElement.dataset.themeMode = mode;
+  if (options.persist) {
+    try { localStorage.setItem(THEME_KEY, mode); } catch (e) { /* 忽略 */ }
+  }
+  updateThemeButton();
+  syncThemeMenu();
+}
+
+/** 系统主题变化：只有「跟随系统」模式才改页面，手动选择保持不动。 */
+function updateSystemTheme(dark) {
+  state.systemDark = !!dark;
+  if (state.themeMode === 'system') {
+    applyThemeMode('system', { systemDark: state.systemDark });
+  } else {
+    syncThemeMenu();
+  }
+}
+
+function setThemeMenu(open) {
+  const menu = $('themeMenu');
+  const btn = $('themeToggle');
+  if (!menu || !btn) return;
+  menu.hidden = !open;
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
+function chooseThemeMode(mode) {
+  applyThemeMode(mode, { persist: true });
+  setThemeMenu(false);
+  const btn = $('themeToggle');
+  if (btn) btn.focus();
+}
+
+function toggleThemeMenu() {
+  const menu = $('themeMenu');
+  if (menu) setThemeMenu(menu.hidden);
+}
+
+state.themeMode = savedThemeMode();
+state.systemDark = systemPrefersDark();
+
+// 浏览器媒体查询是系统主题最及时的信号；win_icon 的原生推送作为补充。
+const systemThemeMedia = window.matchMedia
+  ? window.matchMedia('(prefers-color-scheme: dark)')
+  : null;
+if (systemThemeMedia) {
+  const onSystemThemeChange = (event) => updateSystemTheme(event.matches);
+  if (systemThemeMedia.addEventListener) {
+    systemThemeMedia.addEventListener('change', onSystemThemeChange);
+  } else if (systemThemeMedia.addListener) {
+    systemThemeMedia.addListener(onSystemThemeChange);   // 旧版 WebView2
+  }
 }
 
 function applyAccent(rgb) {
@@ -54,12 +165,6 @@ function applyAccent(rgb) {
   // 依据亮度决定强调色上的前景色，保证按钮文字可读
   const lum = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
   root.style.setProperty('--accent-fg', lum > 0.62 ? '#1c1c1c' : '#ffffff');
-}
-
-function toggleTheme() {
-  const next = state.theme === 'dark' ? 'light' : 'dark';
-  applyTheme(next);
-  try { localStorage.setItem('wbTheme', next); } catch (e) { /* 忽略 */ }
 }
 
 /* ---------- 日志 ---------- */
@@ -759,10 +864,8 @@ window.__onBackend = function (kind, data) {
     appendLog(data);
 
   } else if (kind === 'theme') {
-    // 系统主题变化：用户手动选过亮/暗时保留手动选择，否则跟随系统。
-    let saved = null;
-    try { saved = localStorage.getItem('wbTheme'); } catch (e) { /* 忽略 */ }
-    if (!saved) applyTheme(data.dark ? 'dark' : 'light');
+    // 系统主题变化：只有「跟随系统」模式才改页面；手动选过亮/暗时保持不动。
+    updateSystemTheme(!!data.dark);
 
   } else if (kind === 'done') {
     const p = data.payload;
@@ -1243,10 +1346,11 @@ window.addEventListener('beforeunload', () => { BEAT_STOPPED = true; });
 async function boot(api) {
   const info = await api.bootstrap();
 
-  // 主题：优先用本地记忆，其次跟随系统
-  let saved = null;
-  try { saved = localStorage.getItem('wbTheme'); } catch (e) { /* 忽略 */ }
-  applyTheme(saved || (info.dark ? 'dark' : 'light'));
+  // 主题：首屏已由 index.html 的内联脚本上色；这里用创建窗口前探测到的
+  // 系统主题校准「跟随系统」模式，并同步三态菜单与按钮状态。
+  const initialDark = typeof info.dark === 'boolean'
+    ? info.dark : systemPrefersDark();
+  applyThemeMode(state.themeMode, { systemDark: initialDark });
   if (info.accent) applyAccent(info.accent);
 
   $('env').textContent = 'Python ' + info.python + ' · ' + info.platform;
@@ -1308,7 +1412,7 @@ async function boot(api) {
   // 用后端读到的系统主题/标题再校正一次
   try {
     const t = await api.system_theme();
-    if (!localStorage.getItem('wbTheme')) applyTheme(t.dark ? 'dark' : 'light');
+    updateSystemTheme(!!t.dark);
     if (t.accent) applyAccent(t.accent);
     await api.native_title('WorkBuddy 控制台');
   } catch (e) {
@@ -1317,9 +1421,25 @@ async function boot(api) {
 }
 
 document.addEventListener('DOMContentLoaded', function () {
+  // 首屏内联脚本已经上色，这里只同步菜单选中项
+  applyThemeMode(state.themeMode);
+
   $('btnClear').addEventListener('click', clearLog);
   $('btnCopy').addEventListener('click', copyLog);
-  $('themeToggle').addEventListener('click', toggleTheme);
+  $('themeToggle').addEventListener('click', toggleThemeMenu);
+  $('themeMenu').addEventListener('click', (e) => {
+    const option = e.target.closest('[data-theme-mode]');
+    if (option) chooseThemeMode(option.dataset.themeMode);
+  });
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('#themePicker')) setThemeMenu(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    const menu = $('themeMenu');
+    if (e.key !== 'Escape' || !menu || menu.hidden) return;
+    setThemeMenu(false);
+    $('themeToggle').focus();
+  });
   $('btnGrowth').addEventListener('click', () => loadGrowth(false));
   $('btnGrowthRefresh').addEventListener('click', () => loadGrowth(false));
   $('btnStatusRefresh').addEventListener('click', refreshStatus);

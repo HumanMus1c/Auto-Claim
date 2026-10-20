@@ -32,6 +32,8 @@ function makeElement(id) {
     appendChild(child) { el.childElementCount += 1; return child; },
     append() {},
     removeChild() { el.childElementCount -= 1; },
+    setAttribute(name, value) { el[name] = value; },
+    focus() {},
     querySelector() { return makeElement('query'); },
     querySelectorAll(selector) {
       if (id === 'kv' && selector === 'dd') return el.dds || [];
@@ -184,10 +186,18 @@ function testThemeFollowsSystemWhenNotOverridden() {
   assert.strictEqual(h.documentElement.dataset.theme, 'light');
 }
 
+function testThemeFollowsSystemInExplicitSystemMode() {
+  const h = boot('system');
+  h.documentElement.dataset.theme = 'light';      // 模拟首屏内联脚本的结果
+  h.window.__onBackend('theme', { dark: true });
+  assert.strictEqual(h.documentElement.dataset.theme, 'dark');
+}
+
 function testThemeKeepsManualChoice() {
   const h = boot('light');
+  h.documentElement.dataset.theme = 'light';      // 模拟首屏内联脚本的结果
   h.window.__onBackend('theme', { dark: true });
-  assert.strictEqual(h.documentElement.dataset.theme, undefined);
+  assert.strictEqual(h.documentElement.dataset.theme, 'light');
 }
 
 const tests = [
@@ -195,6 +205,7 @@ const tests = [
   ['失败结果不覆盖签到数据', testFailedCommandKeepsCheckinData],
   ['status 完成仍正常更新', testStatusDoneStillUpdates],
   ['系统主题变化时跟随', testThemeFollowsSystemWhenNotOverridden],
+  ['显式跟随系统时响应变化', testThemeFollowsSystemInExplicitSystemMode],
   ['手动主题不被系统覆盖', testThemeKeepsManualChoice],
 ];
 

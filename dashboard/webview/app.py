@@ -124,13 +124,24 @@ def _service_runner():
     return exe, [os.path.abspath(__file__), "--service"]
 
 
-def _system_dark():
-    """当前 Windows 应用主题；读不到时按浅色处理，不影响启动。"""
+def _system_theme():
+    """在创建窗口前读取系统主题与强调色。
+
+    窗口背景色、首帧图标和首屏配色都依赖这份结果：等 WebView2 加载完、
+    JS bridge 就绪后再探测，深色桌面上会先闪一下浅色窗口。读不到时按
+    浅色处理，不影响启动；运行期的变化由 win_icon 轮询后推送。
+    """
     try:
         import win_theme
-        return bool(win_theme.is_dark())
+        dark, accent = win_theme.detect()
+        return {"dark": bool(dark), "accent": [int(c) for c in accent]}
     except Exception:
-        return False
+        return {"dark": False, "accent": [0, 120, 212]}
+
+
+def _system_dark():
+    """当前 Windows 应用主题；读不到时按浅色处理，不影响启动。"""
+    return _system_theme()["dark"]
 
 
 def icon_path(dark=None):
@@ -734,11 +745,13 @@ def _growth_snapshot(signin, endpoint, headers):
 class Api:
     """暴露给 JS 的接口集合。"""
 
-    def __init__(self):
+    def __init__(self, initial_theme=None):
         self._window = None
         self._watchdog = None
         self._lock = threading.Lock()
         self._busy = False
+        # 创建窗口之前探测到的主题，随 bootstrap 首批数据交给前端。
+        self._initial_theme = dict(initial_theme or _system_theme())
 
     # ---------- 生命周期 ----------
 
@@ -766,6 +779,8 @@ class Api:
             "python": sys.version.split()[0],
             "executable": sys.executable,
             "platform": sys.platform,
+            "dark": bool(self._initial_theme.get("dark")),
+            "accent": list(self._initial_theme.get("accent") or (0, 120, 212)),
             "signin": SIGNIN,
             "signin_exists": os.path.exists(SIGNIN),
             "signin_searched": list(SEARCHED),
@@ -1126,12 +1141,8 @@ class Api:
 
     def system_theme(self):
         """把注册表里读到的亮/暗与强调色交给前端做初始配色。"""
-        try:
-            import win_theme
-            dark, accent = win_theme.detect()
-        except Exception:
-            dark, accent = False, (0, 120, 212)
-        return {"dark": bool(dark), "accent": list(accent)}
+        theme = _system_theme()
+        return {"dark": theme["dark"], "accent": theme["accent"]}
 
     def native_title(self, text):
         """用 Win32 API 修正窗口标题。
@@ -1251,7 +1262,14 @@ def main():
                 win_guard.show_message(message, title, warning=warning)
             return
 
-    api = Api()
+    # 创建窗口前先探测系统主题：原生窗口背景色和首帧图标都要立刻匹配，
+    # 不能等 WebView2 加载完、JS bridge 就绪后再由前端纠正（深色下会
+    # 先闪一下浅色窗口，约 1 秒）。同一份结果也随 bootstrap 交给前端。
+    initial_theme = _system_theme()
+    _trace("初始主题（创建窗口前）: dark=%s accent=%s"
+           % (initial_theme["dark"], initial_theme["accent"]))
+
+    api = Api(initial_theme)
 
     # 原生图标（标题栏 / 任务栏 / 托盘）由 win_icon 在窗口显示后接管。
     # 这里用可变容器保存，方便 finally 里统一清理，也避免闭包 nonlocal。
@@ -1311,7 +1329,7 @@ def main():
         width=1180,
         height=800,
         min_size=(940, 640),
-        background_color="#f3f3f3",
+        background_color="#202020" if initial_theme["dark"] else "#f3f3f3",
     )
     # 立刻绑定：bootstrap / system_theme 等调用发生在 start() 之前，
     # _push 要靠它把结果送回前端
@@ -1343,7 +1361,7 @@ def main():
     # start() 表现为静默挂起、不建窗口也不报错，只能靠显式指定后端绕开。
     try:
         webview.start(gui="edgechromium", debug=False,
-                      icon=icon_path(_system_dark()))
+                      icon=icon_path(initial_theme["dark"]))
     finally:
         manager = icon_holder["manager"]
         if manager is not None:

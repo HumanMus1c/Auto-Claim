@@ -42,7 +42,8 @@
 
 外观细节：
 
-- **跟随系统主题与强调色**：`dashboard/win_theme.py` 读注册表 `HKCU\Software\Microsoft\Windows\DWM\ColorizationColor`；强调色按比例调整明度，避免嵌套元素上使用 CSS `filter` 产生副作用。
+- **跟随系统主题与强调色**：`dashboard/win_theme.py` 读注册表 `HKCU\Software\Microsoft\Windows\DWM\ColorizationColor`；强调色按比例调整明度，避免嵌套元素上使用 CSS `filter` 产生副作用。系统主题在**创建窗口之前**探测，原生窗口背景色与首帧图标直接匹配；页面内联脚本在样式表之前按本地选择或 `prefers-color-scheme` 上色，不等待 pywebview bridge，深色桌面启动不再先闪白约 1 秒。
+- **主题切换**：顶栏按钮点开三选项菜单——「跟随系统 / 浅色 / 深色」。默认跟随系统；手动选择会记在 `localStorage` 的 `wbTheme` 里，系统主题变化时不再覆盖手动选择。`prefers-color-scheme` 变化与 `win_icon` 的原生主题推送共同负责运行期同步。
 - **图标自动反色**：界面内的纯线条 SVG 取 `currentColor`，只需设置容器的 `color`；窗口、任务栏和托盘图标由 `dashboard/win_icon.py` 根据 `AppsUseLightTheme` 在 `icon_light.ico`（深色线条）与 `icon_dark.ico`（浅色线条）之间切换，后台每 2 秒轮询一次，系统主题一变就同步。exe 静态图标 `icon.ico` 用深底白线，因为资源管理器不会替文件图标自动反色。几何与三套 ICO 由 `assets/make_icon.py`（Pillow）生成。
 - **托盘图标**：`win_icon.TrayIcon` 通过 `Shell_NotifyIcon` 创建，右键菜单提供「打开控制台 / 退出」；资源管理器重启后会在 `TaskbarCreated` 消息中自动重新注册。设 `WORKBUDDY_TRAY=0` 可临时关闭。
 - **标题栏**：`dashboard/win_title.py` 用 Win32 API 设置 Unicode 标题，绕开早期编码问题。

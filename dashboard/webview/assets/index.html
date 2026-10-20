@@ -3,6 +3,31 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- 首屏主题必须在样式表之前确定：内联执行，不依赖 pywebview bridge。
+     否则要等 bootstrap/system_theme 返回后才上色，深色桌面上会先闪白。 -->
+<script>
+(function () {
+  var mode = 'system';
+  try {
+    var saved = localStorage.getItem('wbTheme');
+    if (saved === 'light' || saved === 'dark' || saved === 'system') mode = saved;
+  } catch (e) { /* localStorage 不可用时按跟随系统处理 */ }
+
+  var dark = false;
+  if (mode === 'system') {
+    try {
+      dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    } catch (e) { /* 不支持时按浅色处理 */ }
+  } else {
+    dark = mode === 'dark';
+  }
+
+  var root = document.documentElement;
+  root.dataset.theme = dark ? 'dark' : 'light';
+  root.dataset.themeMode = mode;
+  root.style.colorScheme = dark ? 'dark' : 'light';
+})();
+</script>
 <title>WorkBuddy 控制台</title>
 <link rel="stylesheet" href="style.css">
 </head>
@@ -40,7 +65,29 @@
   <div class="topbar-right">
     <span class="meta" id="env">Python — · —</span>
     <span class="meta sep" id="envSignin">signin.py —</span>
-    <button class="icon-btn" id="themeToggle" title="切换亮/暗主题">◐</button>
+    <div class="theme-picker" id="themePicker">
+      <button class="icon-btn" id="themeToggle" title="主题：跟随系统"
+              aria-label="主题：跟随系统" aria-haspopup="menu"
+              aria-expanded="false">◐</button>
+      <div class="theme-menu" id="themeMenu" role="menu" hidden>
+        <button class="theme-option" type="button" role="menuitemradio"
+                data-theme-mode="system" aria-checked="true">
+          <span class="theme-check" aria-hidden="true">✓</span>
+          <span class="theme-name">跟随系统</span>
+          <span class="theme-note" id="themeSystemState">当前浅色</span>
+        </button>
+        <button class="theme-option" type="button" role="menuitemradio"
+                data-theme-mode="light" aria-checked="false">
+          <span class="theme-check" aria-hidden="true">✓</span>
+          <span class="theme-name">浅色</span>
+        </button>
+        <button class="theme-option" type="button" role="menuitemradio"
+                data-theme-mode="dark" aria-checked="false">
+          <span class="theme-check" aria-hidden="true">✓</span>
+          <span class="theme-name">深色</span>
+        </button>
+      </div>
+    </div>
   </div>
 </header>
 
