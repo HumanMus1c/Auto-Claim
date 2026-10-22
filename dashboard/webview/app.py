@@ -138,6 +138,43 @@ def _locate_qoder():
 
 QODER = _locate_qoder()
 
+TRAE_SEARCHED = []
+
+
+def _locate_trae():
+    """定位 trae_signin.py，规则与 Qoder 保持一致。"""
+    override = (os.environ.get("WORKBUDDY_TRAE_SIGNIN")
+                or os.environ.get("TRAE_SIGNIN"))
+    if override:
+        return override
+
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(os.path.dirname(os.path.abspath(sys.executable)))
+    roots.extend([HERE, os.getcwd()])
+
+    global TRAE_SEARCHED
+    TRAE_SEARCHED = []
+    seen = set()
+    for start in roots:
+        path = os.path.abspath(start)
+        for _ in range(6):
+            if path in seen:
+                break
+            seen.add(path)
+            candidate = os.path.join(path, "trae_signin.py")
+            TRAE_SEARCHED.append(candidate)
+            if os.path.isfile(candidate):
+                return candidate
+            parent = os.path.dirname(path)
+            if parent == path:
+                break
+            path = parent
+    return os.path.join(HERE, "trae_signin.py")
+
+
+TRAE = _locate_trae()
+
 
 def _signin_log_path():
     """signin.py 的默认日志位置；环境变量优先，规则与 emit() 一致。"""
@@ -153,6 +190,14 @@ def _qoder_log_path():
     if override:
         return override
     return os.path.join(os.path.dirname(os.path.abspath(QODER)), "qoder_signin.log")
+
+
+def _trae_log_path():
+    """trae_signin.py 的默认日志位置；环境变量优先。"""
+    override = os.environ.get("TRAE_SIGNIN_LOG")
+    if override:
+        return override
+    return os.path.join(os.path.dirname(os.path.abspath(TRAE)), "trae_signin.log")
 
 
 def _service_runner():
@@ -317,6 +362,18 @@ def _load_signin():
         return module
 
 
+def _reset_signin_budget(signin):
+    """复用 signin 的认证链路前，先重置它的进程级预算时钟。
+
+    signin.py 把 _started_at / _budget_seconds 记在模块全局，而本程序是长驻
+    进程：上一次刷新留下的时钟超过预算后（默认 420 秒），_budget_left() 就是
+    负数，_run_auth_helper() 会拒绝启动解密子进程并直接抛 HELPER_TIMEOUT。
+    这个状态还会粘住——重置预算的调用原本写在读凭据之后，永远走不到，直到
+    用户跑一条命令或重启程序才恢复。必须在 resolve_session() 之前调用。
+    """
+    signin._start_budget()
+
+
 # Qoder 同样按路径加载，避免与 exe 内可能存在的同名模块冲突。
 _QODER_MODULE = None
 _QODER_LOAD_LOCK = threading.Lock()
@@ -349,6 +406,41 @@ def _load_qoder():
             raise
 
         _QODER_MODULE = module
+        return module
+
+
+# Trae 同样按路径加载；它只依赖标准库，不需要在 spec 里声明 hiddenimports。
+_TRAE_MODULE = None
+_TRAE_LOAD_LOCK = threading.Lock()
+_TRAE_LOCK = threading.RLock()
+
+
+def _load_trae():
+    """按路径加载 trae_signin.py，且只加载一次。"""
+    global _TRAE_MODULE
+    if _TRAE_MODULE is not None:
+        return _TRAE_MODULE
+
+    with _TRAE_LOAD_LOCK:
+        if _TRAE_MODULE is not None:
+            return _TRAE_MODULE
+
+        import importlib.util
+
+        alias = "_workbuddy_trae"
+        spec = importlib.util.spec_from_file_location(alias, TRAE)
+        if spec is None or spec.loader is None:
+            raise ImportError("无法读取 %s" % TRAE)
+
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[alias] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(alias, None)
+            raise
+
+        _TRAE_MODULE = module
         return module
 
 
@@ -522,6 +614,35 @@ def _qoder_log_snapshot(limit=12):
         "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
         "lines": [line for line in lines if line.strip()][-limit:],
     }
+
+
+def _trae_log_snapshot(limit=40):
+    """读取 trae_signin.log 末尾几行，供 Trae 监控页展示。"""
+    path = _trae_log_path()
+    try:
+        stat = os.stat(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = [line.rstrip("\r\n") for line in fh]
+    except OSError:
+        return {"path": path, "at": None, "lines": []}
+    return {
+        "path": path,
+        "at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
+        "lines": [line for line in lines if line.strip()][-limit:],
+    }
+
+
+def _append_trae_log(payload, action="console"):
+    """把控制台触发的结果写进 trae_signin.log。
+
+    trae_signin.append_log() 会用模块自己收集的敏感字段做替换；控制台里
+    只传公开结果（不含 Token / Session），不存在额外泄漏面。
+    """
+    try:
+        trae = _load_trae()
+        trae.append_log(payload, action)
+    except Exception:
+        pass
 
 
 def _append_qoder_log(payload):
@@ -906,6 +1027,11 @@ class Api:
         # Qoder 领取与 WorkBuddy 命令互不阻塞；各自维护忙碌状态。
         self._qoder_busy = False
         self._qoder_state_lock = threading.Lock()
+        # Trae 的刷新/签到/用量会串行访问同一个 SQLite 与账号文件，
+        # 用一把独立状态锁挡住重复点击；最后一次 monitor 结果用于忙碌时回显。
+        self._trae_busy = False
+        self._trae_state_lock = threading.Lock()
+        self._trae_last = None
         # 创建窗口之前探测到的主题，随 bootstrap 首批数据交给前端。
         self._initial_theme = dict(initial_theme or _system_theme())
 
@@ -943,6 +1069,9 @@ class Api:
             "qoder": QODER,
             "qoder_exists": os.path.exists(QODER),
             "qoder_searched": list(QODER_SEARCHED),
+            "trae": TRAE,
+            "trae_exists": os.path.exists(TRAE),
+            "trae_searched": list(TRAE_SEARCHED),
             "readonly": list(READONLY_ACTIONS),
             "actions": [
                 {"key": k, "label": v["label"], "write": v["write"],
@@ -1150,6 +1279,7 @@ class Api:
         if not _SIGNIN_LOCK.acquire(blocking=False):
             return {"ok": False, "error": "有命令正在执行，稍后再刷新任务"}
         try:
+            _reset_signin_budget(signin)
             auth_file, _ = signin.find_auth_file()
             if not auth_file or not os.path.exists(auth_file):
                 return {"ok": False, "error": "未找到登录凭据"}
@@ -1204,6 +1334,10 @@ class Api:
         if not _SIGNIN_LOCK.acquire(blocking=False):
             return {"ok": False, "error": "有命令正在执行，稍后再刷新成长中心"}
         try:
+            # 仪表盘刷新是一组独立请求，别继承上一次命令残留的时间预算。
+            # 必须放在读凭据之前：解密助手也受这个预算约束，负数预算会让它
+            # 直接报 HELPER_TIMEOUT（详见 _reset_signin_budget）。
+            _reset_signin_budget(signin)
             auth_file, _ = signin.find_auth_file()
             if not auth_file or not os.path.exists(auth_file):
                 return {"ok": False, "error": "未找到登录凭据"}
@@ -1216,8 +1350,6 @@ class Api:
 
             endpoint = ((session.get("auth") or {}).get("endpoint")
                         or signin.DEFAULT_ENDPOINT).rstrip("/")
-            # 仪表盘刷新是一组独立请求，别继承上一次命令残留的时间预算。
-            signin._start_budget()
             data = _growth_snapshot(signin, endpoint, headers)
             at = time.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1458,6 +1590,271 @@ class Api:
         _append_log("Qoder 计划任务 %s: %s" % (action, text))
         return result
 
+    # ---------- Trae 多账号监控 ----------
+
+    @staticmethod
+    def _trae_exit(payload):
+        if not isinstance(payload, dict):
+            return 1
+        codes = {"OK": 0, "ALREADY": 0, "CLAIMED": 0, "NO_CHANGE": 0,
+                 "NO_ACCOUNT": 2, "NO_AUTH": 2, "NO_CLIENT": 2}
+        return codes.get(payload.get("result"), 1)
+
+    @staticmethod
+    def _summarize_trae(payload, kind="checkin"):
+        """把 trae_signin 的结果拍平成日志行。"""
+        if not isinstance(payload, dict):
+            return []
+        lines = []
+        report = payload.get("report")
+        if report:
+            lines.append("  " + str(report))
+        pairs = []
+        if kind == "usage":
+            pairs = (("sessions_count", "会话数"),
+                     ("credits", "消耗积分"),
+                     ("input_token", "输入 Token"),
+                     ("output_token", "输出 Token"),
+                     ("cache_rate", "缓存命中率"))
+        elif kind == "import":
+            pairs = (("added", "新增"), ("updated", "更新"))
+        else:
+            pairs = (("total_gained", "本次获得"),
+                     ("remaining_total", "剩余积分"),
+                     ("checked", "成功"),
+                     ("already", "已签到"),
+                     ("failed", "失败"))
+        for key, label in pairs:
+            value = payload.get(key)
+            if value is None or value == "":
+                continue
+            if key == "cache_rate":
+                value = str(value) + "%"
+            lines.append("  %-10s %s" % (label, value))
+        for row in payload.get("accounts") or []:
+            if not isinstance(row, dict):
+                continue
+            mark = "✔" if row.get("ok") else "✖"
+            extra = ""
+            if row.get("gained"):
+                extra = " +%s" % row.get("gained")
+            if row.get("remaining") is not None:
+                extra += "（剩余 %s）" % row.get("remaining")
+            lines.append("  %s %s%s %s" % (mark, row.get("name") or "账号",
+                                           extra, row.get("message") or ""))
+        return lines
+
+    def trae_monitor(self):
+        """读取 Trae 账号、签到历史、用量与日志（不联网、不签到）。"""
+        result = {"path": TRAE, "log": _trae_log_snapshot()}
+        if not os.path.isfile(TRAE):
+            result.update(ok=False, error="未找到 trae_signin.py",
+                          searched=list(TRAE_SEARCHED))
+            return result
+        with self._trae_state_lock:
+            busy = self._trae_busy
+        if busy:
+            cached = dict(self._trae_last or {})
+            cached.update(ok=True, busy=True, log=result["log"], path=TRAE)
+            return cached
+
+        try:
+            with _TRAE_LOCK:
+                trae = _load_trae()
+                trae._started_at = time.monotonic()
+                data = trae.monitor(deep=False)
+        except Exception as exc:
+            return dict(result, ok=False,
+                        error="%s: %s" % (type(exc).__name__, exc))
+
+        data = dict(data or {})
+        data.update(ok=True, busy=False, path=TRAE, log=result["log"])
+        self._trae_last = data
+        return data
+    def _start_trae(self, kind, account_id=None, days=None):
+        if not os.path.isfile(TRAE):
+            return {"ok": False, "error": "未找到 trae_signin.py"}
+        with self._trae_state_lock:
+            if self._trae_busy:
+                return {"ok": False, "error": "Trae 任务正在执行，请稍后再试"}
+            self._trae_busy = True
+
+        threading.Thread(target=self._trae_worker,
+                         args=(kind, account_id, days), daemon=True).start()
+        _append_log("Trae：开始 %s" % kind)
+        return {"ok": True, "kind": kind}
+
+    def _trae_worker(self, kind, account_id=None, days=None):
+        event = {"kind": kind, "exit": 2, "payload": None}
+        labels = {"checkin": "签到", "refresh": "刷新账号状态",
+                  "usage": "同步用量", "import": "导入本机登录态"}
+        label = labels.get(kind, kind)
+        try:
+            self._push("trae_log", "[%s] 开始%s"
+                       % (time.strftime("%H:%M:%S"), label))
+            with _TRAE_LOCK:
+                trae = _load_trae()
+                trae._started_at = time.monotonic()
+                if kind == "checkin":
+                    payload = trae.run_auto(account_id)
+                elif kind == "refresh":
+                    payload = trae.refresh_account(account_id)
+                elif kind == "usage":
+                    payload = trae.run_usage(account_id, days)
+                elif kind == "import":
+                    payload = trae.import_local()
+                else:
+                    raise ValueError("未知 Trae 操作：%s" % kind)
+
+            _append_trae_log(payload, kind)
+            lines = self._summarize_trae(payload, kind)
+            for line in lines:
+                self._push("trae_log", line)
+                _append_log("Trae " + line.strip())
+            event = {"kind": kind, "exit": self._trae_exit(payload),
+                     "payload": payload}
+        except Exception as exc:
+            detail = "%s: %s" % (type(exc).__name__, exc)
+            _append_trae_log({"result": "ERROR", "report": detail}, kind)
+            self._push("trae_log", "Trae %s异常：%s" % (label, detail))
+            _append_log("Trae %s异常：%s" % (label, detail))
+            event["error"] = detail
+        finally:
+            event["log"] = _trae_log_snapshot()
+            event["at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            with self._trae_state_lock:
+                self._trae_busy = False
+            self._push("trae_done", event)
+
+    def trae_checkin(self, account_id=None):
+        """异步签到（不传 account_id 时签所有启用账号）。"""
+        return self._start_trae("checkin", account_id=account_id or None)
+
+    def trae_refresh(self, account_id=None):
+        """异步刷新账号状态与剩余积分。"""
+        return self._start_trae("refresh", account_id=account_id or None)
+
+    def trae_usage(self, account_id=None, days=None):
+        """异步拉取指定账号的用量。"""
+        try:
+            days = int(days) if days not in (None, "") else None
+        except (TypeError, ValueError):
+            days = None
+        return self._start_trae("usage", account_id=account_id or None,
+                                days=days)
+
+    def trae_import(self):
+        """异步扫描本机 Trae 客户端并导入登录态。"""
+        return self._start_trae("import")
+
+    def trae_account_action(self, action, account_id=None, payload=None):
+        """账号增删改、切换主号、换设备号（同步返回，前端 await）。"""
+        if action not in ("add", "update", "remove", "activate",
+                          "renew_device"):
+            return {"ok": False, "error": "未知账号操作：%s" % action}
+        with self._trae_state_lock:
+            if self._trae_busy:
+                return {"ok": False, "error": "Trae 任务正在执行，请稍后再试"}
+
+        payload = payload if isinstance(payload, dict) else {}
+        try:
+            with _TRAE_LOCK:
+                trae = _load_trae()
+                trae._started_at = time.monotonic()
+                if action == "add":
+                    result = trae.add_account(
+                        payload.get("credential") or "",
+                        name=payload.get("name") or None)
+                elif action == "update":
+                    fields = {}
+                    for key in ("name", "enabled", "is_member"):
+                        if key in payload:
+                            fields[key] = payload[key]
+                    result = trae.update_account(account_id, **fields)
+                elif action == "remove":
+                    result = trae.remove_account(account_id)
+                elif action == "activate":
+                    result = trae.set_active(account_id)
+                else:
+                    result = trae.renew_device(account_id)
+        except Exception as exc:
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+
+        _append_trae_log(result, "account-" + action)
+        text = result.get("report") or result.get("error") or "账号操作完成"
+        _append_log("Trae 账号 %s: %s" % (action, text))
+        return result
+
+    def trae_update_settings(self, payload):
+        """保存自动签到间隔、用量天数、飞书 Webhook 等设置。"""
+        with self._trae_state_lock:
+            if self._trae_busy:
+                return {"ok": False, "error": "Trae 任务正在执行，请稍后再试"}
+        try:
+            with _TRAE_LOCK:
+                trae = _load_trae()
+                result = trae.update_settings(payload)
+        except Exception as exc:
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+        _append_trae_log(result, "settings")
+        return result
+
+    def trae_service_status(self):
+        """读取 TraeDailyCheckin 计划任务状态。"""
+        try:
+            import win_service
+            return win_service.trae_status(_trae_log_path())
+        except Exception as exc:
+            return {
+                "supported": os.name == "nt",
+                "ok": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "tasks": [],
+                "installed": False,
+                "installed_count": 0,
+                "enabled": False,
+                "running": False,
+                "next_run": None,
+                "last_run": None,
+                "log": None,
+            }
+
+    def trae_service_action(self, action):
+        """安装/卸载/启用/停用/立即运行/停止 Trae 计划任务。"""
+        allowed = ("install", "uninstall", "enable", "disable", "run", "stop")
+        if action not in allowed:
+            return {"ok": False, "error": "未知服务操作：%s" % action}
+
+        result = None
+        error = None
+        try:
+            import win_service
+            if action == "install":
+                if not os.path.isfile(TRAE):
+                    error = "未找到 trae_signin.py，无法安装计划任务"
+                else:
+                    try:
+                        trae = _load_trae()
+                        primary = (trae.load_store()["settings"]
+                                   .get("auto_time") or "08:05")
+                    except Exception:
+                        primary = "08:05"
+                    times = win_service.trae_trigger_times(primary)
+                    result = win_service.install_trae(TRAE, times=times)
+            else:
+                result = win_service.trae_action(action)
+        except Exception as exc:
+            error = "%s: %s" % (type(exc).__name__, exc)
+
+        if result is None:
+            result = {"ok": False, "error": error}
+        result["status"] = self.trae_service_status()
+        text = result.get("message") or result.get("error") or "操作完成"
+        _append_log("Trae 计划任务 %s: %s" % (action, text))
+        return result
+
     def system_theme(self):
         """把注册表里读到的亮/暗与强调色交给前端做初始配色。"""
         theme = _system_theme()
@@ -1537,6 +1934,12 @@ def _service_main(argv):
 def main():
     import webview
 
+    # 启动耗时的基准点：窗口创建与首帧显示的间隔都要靠它量化。
+    # 实测这台机器上 webview.start() 到页面 loaded 要 1.9~2.1 秒，且与
+    # 页面内容多少无关（只有骨架的空页面也一样），属于 WebView2 初始化
+    # 的固定成本；把窗口延后到页面可绘制再显示，用户就不会看到那段底色。
+    t_start = time.perf_counter()
+
     _trace("main 进入: HERE=%s ASSETS=%s index=%s SIGNIN=%s"
            % (HERE, ASSETS,
               os.path.isfile(os.path.join(ASSETS, "index.html")), SIGNIN))
@@ -1572,7 +1975,7 @@ def main():
             if state == "hung":
                 message = ("WorkBuddy 控制台已在运行，但现有窗口无响应。\n\n"
                            "看门狗（默认开启）会自动结束它；也可以稍后重试，"
-                           "或在任务管理器中结束 Auto-claim-dashboard.exe。")
+                           "或在任务管理器中结束 Auto-Claim-dashboard.exe。")
                 warning = True
             elif state == "missing":
                 message = ("WorkBuddy 控制台已在运行，但暂时找不到窗口。\n"
@@ -1587,6 +1990,10 @@ def main():
     initial_theme = _system_theme()
     _trace("初始主题（创建窗口前）: dark=%s accent=%s"
            % (initial_theme["dark"], initial_theme["accent"]))
+
+    # 默认等页面可绘制后再显示窗口；WORKBUDDY_INSTANT_WINDOW=1 恢复旧行为
+    # （窗口立刻出现，但 WebView2 初始化期间会有一段空白底色）。
+    instant_window = os.environ.get("WORKBUDDY_INSTANT_WINDOW") == "1"
 
     api = Api(initial_theme)
 
@@ -1648,6 +2055,9 @@ def main():
         width=1180,
         height=800,
         min_size=(940, 640),
+        # 先隐藏：WebView2 初始化 + 首次导航期间窗口只有一块主题底色
+        # （就是之前看到的"空白窗口"），等页面首帧就绪后再显示。
+        hidden=not instant_window,
         background_color="#202020" if initial_theme["dark"] else "#f3f3f3",
     )
     # 立刻绑定：bootstrap / system_theme 等调用发生在 start() 之前，
@@ -1656,6 +2066,40 @@ def main():
 
     # 窗口显示后才能拿到稳定的 HWND；事件回调在独立线程里执行。
     window.events.shown += _start_native_icons
+
+    # 页面可绘制后再把窗口露出来。
+    #
+    # 为什么是 _pywebviewready 而不是 loaded：pywebview 在 loaded 之前就把
+    # bridge 注入并执行完，此刻 DOM 已完整、样式已应用；用公开事件 loaded
+    # 兜底（两者几乎同时置位），再加一个 5 秒兜底线程，避免页面加载异常时
+    # 窗口永远不出现。
+    revealed = {"done": bool(instant_window)}
+
+    def _reveal_window(*_):
+        if revealed["done"]:
+            return
+        revealed["done"] = True
+        try:
+            window.show()
+            _trace("窗口显示: main 后 %.2fs（不含 PyInstaller 解包时间）"
+                   % (time.perf_counter() - t_start))
+        except Exception as exc:
+            # show() 内部要等 shown 事件；隐藏窗口在创建阶段已经触发过一次，
+            # 正常不会超时。真失败也不能让启动流程崩掉。
+            _trace("窗口显示失败: %r" % (exc,))
+
+    ready_event = getattr(window.events, "_pywebviewready", None)
+    if ready_event is not None:
+        ready_event += _reveal_window
+    window.events.loaded += _reveal_window
+
+    def _reveal_fallback():
+        time.sleep(5)
+        if not revealed["done"]:
+            _trace("窗口显示兜底触发：页面迟迟未就绪")
+            _reveal_window()
+
+    threading.Thread(target=_reveal_fallback, daemon=True).start()
 
     # UI 看门狗：窗口创建后开始等主窗口，连续几次 WM_NULL 超时就退出，
     # 避免卡死的 WebView2 窗口把 DWM/任务栏一起拖住。

@@ -46,6 +46,9 @@ hidden = [
     'plistlib',
     'ntpath',
     'winreg',
+    # trae_signin.py 同样按路径加载，静态分析不到；它依赖 sqlite3
+    # 扩展模块，不声明会在冻结后报 ModuleNotFoundError: sqlite3。
+    'sqlite3',
     # pywebview 按平台动态加载后端，不声明会退回到无窗口的默认行为
     'webview.platforms.edgechromium',
     'webview.platforms.winforms',
@@ -87,7 +90,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Auto-claim-dashboard',
+    name='Auto-Claim-dashboard',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

@@ -16,6 +16,7 @@ const path = require('path');
 const vm = require('vm');
 
 const APP = path.join(__dirname, 'assets', 'app.js');
+const INDEX = path.join(__dirname, 'assets', 'index.html');
 
 function makeElement(id) {
   const el = {
@@ -92,7 +93,7 @@ function boot(savedTheme) {
   window.window = window;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(APP, 'utf8'), context, { filename: APP });
-  return { el, dds, window, documentElement };
+  return { el, dds, window, documentElement, context };
 }
 
 function seedStatus(h) {
@@ -176,6 +177,8 @@ function testStatusDoneStillUpdates() {
   assert.strictEqual(h.dds[2].textContent, '2000');
   assert.strictEqual(h.dds[4].textContent, '3 / 7 天');
   assert.strictEqual(h.dds[5].textContent, '每日签到');
+  assert.strictEqual(h.el('wbAccounts').childElementCount, 1);
+  assert.ok(h.el('wbAccountAt').textContent.startsWith('最近读取'));
 }
 
 function testThemeFollowsSystemWhenNotOverridden() {
@@ -200,6 +203,77 @@ function testThemeKeepsManualChoice() {
   assert.strictEqual(h.documentElement.dataset.theme, 'light');
 }
 
+function testAccountRegionDefaults() {
+  const h = boot();
+  const missing = vm.runInContext('accountRegionInfo({})', h.context);
+  assert.strictEqual(missing.kind, 'cn');
+  assert.strictEqual(missing.label, '国内');
+
+  const intl = vm.runInContext("accountRegionInfo({ region: 'SG' })", h.context);
+  assert.strictEqual(intl.kind, 'intl');
+  assert.strictEqual(intl.label, '国际');
+}
+
+function testSideStatusUsesUnifiedWording() {
+  const h = boot();
+
+  vm.runInContext("qoderSideState({ result: 'OK', campaigns: "
+    + "[{ campaign: 'daily', active: true, status: 'CLAIMABLE' }] }, "
+    + "{ result: 'OK' }, true)", h.context);
+  assert.strictEqual(h.el('qoderSideHint').textContent, '未领取');
+  assert.strictEqual(h.el('qoderDot').className, 'side-dot ok');
+
+  vm.runInContext("qoderSideState({ result: 'OK', campaigns: "
+    + "[{ campaign: 'daily', active: true, status: 'CLAIMED' }] }, "
+    + "{ result: 'OK' }, true)", h.context);
+  assert.strictEqual(h.el('qoderSideHint').textContent, '已领取');
+  assert.strictEqual(h.el('qoderDot').className, 'side-dot ok');
+
+  vm.runInContext("renderFromStatus({ result: 'OK', today_checked_in: false, "
+    + "today_credit: 0, streak_days: 2, total_credits: 10, "
+    + "checkin_dates: ['2026-10-22'] })", h.context);
+  assert.strictEqual(h.el('wbSideHint').textContent, '未签到');
+  assert.strictEqual(h.el('wbDot').className, 'side-dot ok');
+
+  vm.runInContext("renderFromStatus({ result: 'ALREADY', today_checked_in: true, "
+    + "today_credit: 100, streak_days: 3, total_credits: 110, "
+    + "checkin_dates: ['2026-10-22'] })", h.context);
+  assert.strictEqual(h.el('wbSideHint').textContent, '已签到');
+
+  vm.runInContext("TRAE_DATA = { ok: true, active_id: 'a', "
+    + "history: { today: '2026-10-22' }, accounts: "
+    + "[{ id: 'a', enabled: true, last_checkin: '2026-10-22' }] }; "
+    + "TRAE_BUSY = false;", h.context);
+  vm.runInContext('traeSideState()', h.context);
+  assert.strictEqual(h.el('traeSideHint').textContent, '已签到');
+  assert.strictEqual(h.el('traeDot').className, 'side-dot ok');
+
+  vm.runInContext("TRAE_DATA = { ok: true, active_id: 'a', "
+    + "history: { today: '2026-10-22' }, accounts: "
+    + "[{ id: 'a', enabled: true, last_checkin: '' }] };", h.context);
+  vm.runInContext('traeSideState()', h.context);
+  assert.strictEqual(h.el('traeSideHint').textContent, '未签到');
+  assert.strictEqual(h.el('traeDot').className, 'side-dot ok');
+}
+
+function testPlanTaskHeadingAndTraeOrder() {
+  const html = fs.readFileSync(INDEX, 'utf8');
+  const headings = Array.from(html.matchAll(/<h2>([^<]+)<\/h2>/g), (m) => m[1]);
+  assert.strictEqual(headings.filter((x) => x === '计划任务').length, 3);
+  assert.ok(!headings.includes('脚本服务'));
+  assert.ok(!headings.includes('Qoder 计划任务'));
+  assert.ok(!headings.includes('Trae 计划任务'));
+
+  const start = html.indexOf('id="page-trae"');
+  const end = html.indexOf('</main>', start);
+  const page = html.slice(start, end);
+  const accounts = page.indexOf('id="traeAccounts"');
+  const service = page.indexOf('id="tsvcState"');
+  const status = page.indexOf('id="traeKv"');
+  assert.ok(accounts >= 0 && service > accounts && status > service,
+    'Trae 计划任务应位于账号卡片下方、签到状态上方');
+}
+
 const tests = [
   ['growth 完成不覆盖签到数据', testGrowthDoneKeepsCheckinData],
   ['失败结果不覆盖签到数据', testFailedCommandKeepsCheckinData],
@@ -207,6 +281,9 @@ const tests = [
   ['系统主题变化时跟随', testThemeFollowsSystemWhenNotOverridden],
   ['显式跟随系统时响应变化', testThemeFollowsSystemInExplicitSystemMode],
   ['手动主题不被系统覆盖', testThemeKeepsManualChoice],
+  ['账号区域缺省为国内、SG 为国际', testAccountRegionDefaults],
+  ['侧边栏状态统一为已签到/未签到、已领取/未领取', testSideStatusUsesUnifiedWording],
+  ['三个计划任务标题一致且 Trae 卡片位于账号下方', testPlanTaskHeadingAndTraeOrder],
 ];
 
 for (const [name, fn] of tests) {

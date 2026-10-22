@@ -124,6 +124,11 @@ class AuthTests(unittest.TestCase):
         self.assertFalse(out["online_checked"])
         self.assertEqual(helper.call_args.args[1], {"operation": "probe"})
         self.assertNotIn("accessToken", json.dumps(out))
+        self.assertEqual(out["region"], "CN")
+        self.assertEqual(out["account"]["uid_masked"], "synt…user")
+        self.assertEqual(out["account"]["domain"], "www.workbuddy.cn")
+        self.assertNotIn("synthetic-user", json.dumps(out))
+        self.assertNotIn("envelope", json.dumps(out))
         post.assert_not_called()
 
     def test_all_silent_modes_log_auth_errors(self):

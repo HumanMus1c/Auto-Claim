@@ -12,14 +12,15 @@ import marshal
 import os
 import sys
 
-EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-claim-dashboard.exe")
+EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-Claim-dashboard.exe")
 
 # app.py 里后期才加入的函数名/属性，用作"新版标记"
 FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 "service_status", "service_action",
                 "_growth_snapshot", "_growth_changes",
                 "acquire_single_instance", "UIWatchdog",
-                "IconManager"]
+                "IconManager", "_load_trae", "trae_monitor",
+                "trae_service_status", "trae_account_action"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
 # 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。

@@ -13,9 +13,12 @@ import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
+sys.path.insert(0, ROOT)
 
 import app  # noqa: E402
+import qoder_signin as qoder  # noqa: E402
 
 
 class FakeQoder(object):
@@ -107,6 +110,29 @@ class QoderLogFileTest(unittest.TestCase):
         app._append_qoder_log("not a dict")
 
         self.assertEqual(app._qoder_log_snapshot()["lines"], [])
+
+
+class QoderAccountSummaryTest(unittest.TestCase):
+
+    def test_public_user_masks_contact_fields(self):
+        account = qoder._public_user({
+            "id": "q-123",
+            "name": "Qoder 用户",
+            "email": "alice@example.com",
+            "phone": "13800138000",
+            "avatarUrl": "https://example.com/avatar.png",
+        })
+
+        self.assertEqual(account["id"], "q-123")
+        self.assertEqual(account["name"], "Qoder 用户")
+        self.assertEqual(account["email_masked"], "al***@example.com")
+        self.assertEqual(account["phone_masked"], "138****8000")
+        self.assertEqual(account["avatar_url"],
+                         "https://example.com/avatar.png")
+
+    def test_public_user_ignores_invalid_input(self):
+        self.assertEqual(qoder._public_user(None), {})
+        self.assertEqual(qoder._public_user("not-a-dict"), {})
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import hashlib
 import os
 import sys
 
-EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-claim-dashboard.exe")
+EXE = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "Auto-Claim-dashboard.exe")
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
 
 

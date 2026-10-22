@@ -18,9 +18,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD = os.path.dirname(HERE)
 REPO = os.path.dirname(DASHBOARD)
-SPEC = os.path.join(HERE, "Auto-claim-dashboard.spec")
+SPEC = os.path.join(HERE, "Auto-Claim-dashboard.spec")
 DIST = REPO
-NAME = "Auto-claim-dashboard.exe"
+NAME = "Auto-Claim-dashboard.exe"
 
 PY = sys.executable
 # 子进程统一用 UTF-8 输出，否则中文/符号在 GBK 控制台会被替换或抛异常，
@@ -51,9 +51,10 @@ def pre_checks():
 
     r = run("语法检查", [PY, "-m", "py_compile",
                         os.path.join(HERE, "app.py"),
-                        os.path.join(DASHBOARD, "win_guard.py")])
+                        os.path.join(DASHBOARD, "win_guard.py"),
+                        os.path.join(REPO, "trae_signin.py")])
     if r != 0:
-        failed.append("app.py 或 win_guard.py 语法错误")
+        failed.append("app.py、win_guard.py 或 trae_signin.py 语法错误")
 
     js = os.path.join(HERE, "assets", "app.js")
     if run("JS 语法检查", ["node", "--check", js]) != 0:
@@ -71,7 +72,8 @@ def pre_checks():
 
     if run("单元测试", [PY, "-X", "utf8", "-m", "unittest",
                         "test_locate_signin", "test_win_guard",
-                        "test_win_service", "test_win_icon"]) != 0:
+                        "test_win_service", "test_win_icon",
+                        "test_trae_backend"]) != 0:
         failed.append("单元测试未通过")
 
     return failed
@@ -134,7 +136,7 @@ def post_check():
 
 def main():
     print("=" * 56)
-    print("Auto-claim-dashboard 打包")
+    print("Auto-Claim-dashboard 打包")
     print("=" * 56)
 
     failed = pre_checks()

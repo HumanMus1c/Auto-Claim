@@ -215,6 +215,19 @@ document.querySelector('.pane-tasks').getBoundingClientRect().height
 
 ---
 
+### 11. 长驻进程里刷新成长中心固定报「凭据处理超时，已停止子进程」
+
+| | |
+|---|---|
+| 现象 | 日志出现 `×刷新成长中心失败：读取登录凭据失败：AuthError：凭据处理超时，已停止子进程，请稍后重试。`；点重试仍然失败，重启程序后恢复；同一时刻命令行 `python signin.py doctor` 却正常 |
+| 根因 | `signin.py` 的 `_started_at` / `_budget_seconds` 是模块级全局量（默认 420 秒预算），而仪表盘是长驻进程。`growth()` 原先在 `resolve_session()` **之后**才重置预算；距上次刷新超过 420 秒后 `_budget_left()` 变成负数，`_run_auth_helper()` 里 `timeout = min(10, _budget_left()) <= 0` 直接抛 `HELPER_TIMEOUT`——解密子进程根本没启动。重置预算的代码又排在解密之后，永远走不到，故障会一直粘住直到重启 |
+| 修法 | 新增 `_reset_signin_budget()`；`tasks()` / `growth()` 都在 `resolve_session()` 之前调用。`HELPER_TIMEOUT` 的文案「已停止子进程」在这个分支里具有误导性 |
+| 验证 | 手动把 `_started_at` 拨到 20 分钟前：修复前 `resolve_session()` 12 毫秒即报 `HELPER_TIMEOUT`，修复后 `growth()` 2.5 秒成功拉到 16 个任务 |
+
+判据：同一份凭据下 `doctor` 正常、仪表盘刷新却在**瞬间**失败（不是等满 10 秒），基本就是这个预算时钟问题；只有真等满 10 秒，才需要怀疑 `WorkBuddy.exe` 启动慢或被安全软件拦截。
+
+---
+
 ### 附带：一个把排查带偏的观察
 
 诊断 exe 显示 `sys.executable` 是 8.3 短路径 `C:\Users\SILVER~1\...`，而我用长路径 `C:\Users\SilverT1ger\...` 去检查文件是否存在，据此判断「缓存没写入」。
@@ -263,7 +276,7 @@ window.evaluate_js("JSON.stringify({ready:document.readyState,"
 ```python
 sys.frozen = True
 sys._MEIPASS = r"...\Temp\_MEI_FAKE"
-sys.executable = r"...\Auto-claim-dashboard.exe"
+sys.executable = r"...\Auto-Claim-dashboard.exe"
 assert app.SEARCHED[0] == os.path.join(exe_dir, "signin.py")
 ```
 

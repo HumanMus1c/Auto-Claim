@@ -1,7 +1,7 @@
 # 卡死事件分析：2026-10-19 / 2026-10-20 的 `AppHangB1`
 
 > 现象：控制台窗口失去响应，**整个桌面无法切换窗口**；结束
-> `Auto-claim-dashboard.exe` 后瞬间恢复。两天内发生两次。
+> `Auto-Claim-dashboard.exe` 后瞬间恢复。两天内发生两次。
 >
 > 这份文档只记录有证据的部分，并把“已确认”“已排除”“仍未确认”分开写，
 > 避免下次又把猜测当成结论。
@@ -33,7 +33,7 @@
 | 时间 | 程序 | PID | 进程启动时间 | HangType |
 |---|---|---|---|---|
 | 2026-10-19 22:49:57 | `WorkBuddyConsole.exe`（旧名） | 0xbfb8 | 22:44:13 | Top level window is idle |
-| 2026-10-20 18:38:44 | `Auto-claim-dashboard.exe` | 0x40c4 (16580) | 17:21:59 | Top level window is idle |
+| 2026-10-20 18:38:44 | `Auto-Claim-dashboard.exe` | 0x40c4 (16580) | 17:21:59 | Top level window is idle |
 
 两次 WER 问题签名：
 

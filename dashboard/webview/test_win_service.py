@@ -144,5 +144,49 @@ class QoderTaskTest(unittest.TestCase):
         self.assertEqual(len(times), 5)
 
 
+class TraeTaskTest(unittest.TestCase):
+
+    def test_trae_task_is_independent(self):
+        self.assertEqual(win_service.TRAE_TASK_NAMES,
+                         ("TraeDailyCheckin",))
+        self.assertNotIn("TraeDailyCheckin", win_service.TASK_NAMES)
+        self.assertNotIn("TraeDailyCheckin", win_service.QODER_TASK_NAMES)
+
+    def test_trae_status_normalization(self):
+        raw = {
+            "ok": True,
+            "tasks": [
+                {"name": "TraeDailyCheckin", "installed": True,
+                 "state": "Ready", "last_run": "2026-10-20 08:05:00",
+                 "next_run": "2026-10-20 10:05:00", "last_result": 0,
+                 "action": "pythonw trae_signin.py silent"},
+            ],
+        }
+        status = win_service._normalize_status(
+            raw, specs=win_service.TRAE_TASKS)
+
+        self.assertTrue(status["installed"])
+        self.assertTrue(status["enabled"])
+        self.assertEqual(status["installed_count"], 1)
+        self.assertEqual(len(status["tasks"]), 1)
+        self.assertEqual(status["tasks"][0]["name"], "TraeDailyCheckin")
+        self.assertEqual(status["tasks"][0]["label"], "每日签到")
+        self.assertEqual(status["next_run"], "2026-10-20 10:05:00")
+
+    def test_trae_trigger_times_expand_offsets(self):
+        times = win_service.trae_trigger_times("08:05")
+        self.assertEqual(times,
+                         ["08:05", "10:05", "13:05", "17:05", "21:05"])
+
+    def test_trae_trigger_times_wrap_past_midnight(self):
+        times = win_service.trae_trigger_times("22:30")
+        self.assertEqual(times,
+                         ["22:30", "00:30", "03:30", "07:30", "11:30"])
+
+    def test_trae_trigger_times_fall_back_on_invalid_input(self):
+        self.assertEqual(win_service.trae_trigger_times("oops"),
+                         win_service.trae_trigger_times("08:05"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

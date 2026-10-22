@@ -10,7 +10,7 @@
 
 ## spec 关键点
 
-文件：`dashboard/webview/Auto-claim-dashboard.spec`
+文件：`dashboard/webview/Auto-Claim-dashboard.spec`
 
 ```python
 HERE  = os.path.abspath(os.path.dirname(SPEC))
@@ -110,7 +110,7 @@ ENV = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
 ## 产物
 
 ```text
-Auto-claim-dashboard.exe    约 15.0 MB    2026-10-20 12:07
+Auto-Claim-dashboard.exe    约 15.0 MB    2026-10-20 12:07
 ```
 
 参照 `signin.py` 放在仓库根目录，可单独拷走（同目录需有 `signin.py`）。

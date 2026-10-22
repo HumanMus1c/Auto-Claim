@@ -15,7 +15,7 @@ dashboard/webview/run.log
 dashboard/webview/assets/*.log
 dashboard/webview/build/
 dashboard/webview/__pycache__/
-Auto-claim-dashboard.exe
+Auto-Claim-dashboard.exe
 
 # WebView2 运行时会在工作目录生成 crashpad 日志
 debug.log
@@ -25,3 +25,6 @@ debug.log
 
 # Qoder CN 每日 Credits 领取日志
 qoder_signin.log
+
+# Trae 多账号签到日志（包含账号 ID / 状态，不含 Token 原文）
+trae_signin.log

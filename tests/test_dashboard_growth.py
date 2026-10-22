@@ -7,7 +7,9 @@
 
 import importlib.util
 import os
+import types
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 APP = os.path.join(REPO, "dashboard", "webview", "app.py")
@@ -82,6 +84,60 @@ class GrowthChangesTest(unittest.TestCase):
         old["tasks"][0]["status"] = "accepted"
         new["tasks"][0]["status"] = "in_progress"
         self.assertEqual(app._growth_changes(old, new), [])
+
+
+class SigninBudgetResetTest(unittest.TestCase):
+    """回归：长驻进程的旧预算时钟会让人误以为“凭据处理超时”。
+
+    signin 的时间预算记在模块全局。仪表盘进程里上一次刷新的时钟超过 420 秒
+    后，_budget_left() 为负，resolve_session() 起解密子进程前就会拒绝并抛
+    HELPER_TIMEOUT；如果重置预算写在读凭据之后，这个状态会一直粘住。这里用
+    假模块锁住顺序：必须先 _start_budget()，再 resolve_session()。
+    """
+
+    def _fake(self, calls):
+        fake = types.SimpleNamespace(
+            DEFAULT_ENDPOINT="https://example.test",
+            find_auth_file=lambda: (__file__, [__file__]),
+            load_session_retry=lambda path: {"auth": {}, "account": {}},
+            build_headers=lambda session: {},
+        )
+
+        def start_budget(*args, **kwargs):
+            fake.budget_started = True
+            calls.append("budget")
+
+        def resolve_session(session):
+            calls.append("resolve")
+            self.assertTrue(getattr(fake, "budget_started", False),
+                            "resolve_session 在预算重置之前被调用")
+            return {"auth": {"endpoint": "https://example.test"},
+                    "account": {"uid": "u"}}
+
+        fake._start_budget = start_budget
+        fake.resolve_session = resolve_session
+        return fake
+
+    def test_growth_resets_budget_before_credentials(self):
+        calls = []
+        fake = self._fake(calls)
+        with mock.patch.object(app, "_load_signin", return_value=fake), \
+                mock.patch.object(app, "_growth_snapshot", return_value={"tasks": []}), \
+                mock.patch.object(app, "_load_growth_store", return_value={"data": {}}), \
+                mock.patch.object(app, "_save_growth_store"):
+            result = app.Api.growth(None)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(calls[:2], ["budget", "resolve"])
+
+    def test_tasks_resets_budget_before_credentials(self):
+        calls = []
+        fake = self._fake(calls)
+        fake.get = lambda url, headers: (200, {"tasks": []})
+        fake.dig = lambda body, key: body.get(key)
+        with mock.patch.object(app, "_load_signin", return_value=fake):
+            result = app.Api.tasks(None)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(calls[:2], ["budget", "resolve"])
 
 
 if __name__ == "__main__":

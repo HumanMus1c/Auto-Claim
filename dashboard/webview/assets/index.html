@@ -101,6 +101,7 @@
         <b>WorkBuddy</b>
         <small>签到 · 成长中心</small>
       </span>
+      <span class="side-dot" id="wbDot"></span>
     </button>
     <button class="side-tab" type="button" data-page="qoder" id="sideQoder">
       <span class="side-badge q">Q</span>
@@ -110,9 +111,25 @@
       </span>
       <span class="side-dot" id="qoderDot"></span>
     </button>
+    <button class="side-tab" type="button" data-page="trae" id="sideTrae">
+      <span class="side-badge t">T</span>
+      <span class="side-text">
+        <b>Trae</b>
+        <small>多账号签到 · 用量</small>
+      </span>
+      <span class="side-dot" id="traeDot"></span>
+    </button>
+    <div class="side-foot">
+      <span class="side-foot-label">WorkBuddy 状态</span>
+      <span class="side-foot-value" id="wbSideHint">未检测</span>
+    </div>
     <div class="side-foot">
       <span class="side-foot-label">Qoder 状态</span>
       <span class="side-foot-value" id="qoderSideHint">未检测</span>
+    </div>
+    <div class="side-foot">
+      <span class="side-foot-label">Trae 状态</span>
+      <span class="side-foot-value" id="traeSideHint">未检测</span>
     </div>
   </aside>
 
@@ -150,10 +167,24 @@
   </section>
   <p class="hint" id="actionHint">只读查询不会改动服务端状态；带「写操作」标记的会真实领取。悬停按钮可查看完整说明。</p>
 
-  <!-- ③ 脚本服务（Windows 计划任务） -->
+  <!-- ③ 账号管理 -->
+  <section class="pane account-pane pane-workbuddy-account">
+    <div class="pane-head">
+      <h2>账号</h2>
+      <div class="pane-tools">
+        <span class="growth-updated" id="wbAccountAt">尚未刷新</span>
+        <button class="mini-btn" id="btnWbAccountRefresh" title="重新读取 WorkBuddy 本机登录态与账号摘要">刷新账号</button>
+      </div>
+    </div>
+    <div class="account-list" id="wbAccounts">
+      <p class="empty">正在读取 WorkBuddy 本机登录态…</p>
+    </div>
+  </section>
+
+  <!-- ④ 计划任务（Windows 计划任务） -->
   <section class="pane pane-service">
     <div class="pane-head">
-      <h2>脚本服务</h2>
+      <h2>计划任务</h2>
       <div class="svc-head">
         <span class="svc-pill" id="svcState">检测中…</span>
         <button class="mini-btn" id="btnSvcRefresh" title="重新读取计划任务状态" disabled>刷新状态</button>
@@ -275,9 +306,22 @@
     </section>
     <p class="hint" id="qoderHint">只读刷新不会改动服务端状态；领取按钮会真实调用 Qoder 接口。</p>
 
+    <section class="pane account-pane pane-qoder-account">
+      <div class="pane-head">
+        <h2>账号</h2>
+        <div class="pane-tools">
+          <span class="growth-updated" id="qoderAccountAt">尚未刷新</span>
+          <button class="mini-btn" id="btnQoderAccountRefresh" title="重新读取 Qoder CN 本机登录态与账号摘要">刷新账号</button>
+        </div>
+      </div>
+      <div class="account-list" id="qoderAccounts">
+        <p class="empty">打开此页或点击「刷新监控」后显示 Qoder CN 账号</p>
+      </div>
+    </section>
+
     <section class="pane pane-service">
       <div class="pane-head">
-        <h2>Qoder 计划任务</h2>
+        <h2>计划任务</h2>
         <div class="svc-head">
           <span class="svc-pill" id="qsvcState">检测中…</span>
           <button class="mini-btn" id="btnQSvcRefresh" title="重新读取 QoderDailyCredits 状态" disabled>刷新状态</button>
@@ -336,7 +380,220 @@
       <div class="log" id="qoderLog"></div>
     </section>
   </main>
+
+  <!-- Trae 多账号监控页 -->
+  <main class="page" id="page-trae" hidden>
+    <section class="cards">
+      <article class="card">
+        <span class="card-label">今日获得</span>
+        <strong class="card-value" id="tToday">—</strong>
+        <span class="card-hint" id="tTodayHint">等待查询</span>
+      </article>
+      <article class="card">
+        <span class="card-label">剩余积分</span>
+        <strong class="card-value" id="tRemaining">—</strong>
+        <span class="card-hint" id="tRemainingHint">等待查询</span>
+      </article>
+      <article class="card">
+        <span class="card-label">签到账号</span>
+        <strong class="card-value" id="tAccounts">—</strong>
+        <span class="card-hint" id="tAccountsHint">等待查询</span>
+      </article>
+      <article class="card">
+        <span class="card-label">计划任务</span>
+        <strong class="card-value small" id="tTask">—</strong>
+        <span class="card-hint" id="tTaskHint">未检测</span>
+      </article>
+    </section>
+
+    <section class="actions">
+      <button class="btn primary" id="btnTraeRefresh" title="重新读取账号、签到历史、用量与日志（不联网）">刷新监控</button>
+      <button class="btn act" id="btnTraeCheckin" title="真实调用 Trae 签到接口；已签到账号会自动跳过">一键签到</button>
+      <div class="spacer"></div>
+      <button class="btn ghost" id="btnTraeImport" title="只读扫描本机 Trae 客户端登录态并导入">导入本机登录态</button>
+      <button class="btn ghost" id="btnTraeAdd" title="粘贴 Cloud-IDE-JWT Token 或 X-Cloudide-Session 会话 Cookie">添加账号</button>
+      <button class="btn ghost" id="btnTraeSettings" title="自动签到时间、签到间隔、用量天数与飞书推送">设置</button>
+    </section>
+    <p class="hint" id="traeHint">刷新监控只读；一键签到与账号操作会真实改动本地账号或服务端签到状态。</p>
+
+    <section class="pane account-pane pane-trae-accounts">
+      <div class="pane-head">
+        <h2>账号</h2>
+        <div class="pane-tools">
+          <span class="growth-updated" id="traeAccountsAt">尚未刷新</span>
+          <button class="mini-btn" id="btnTraeAccountsRefresh" title="刷新所有启用账号的状态与剩余积分">刷新状态</button>
+        </div>
+      </div>
+      <div class="account-list" id="traeAccounts">
+        <p class="empty">打开此页或点击「刷新监控」后显示 Trae 账号</p>
+      </div>
+    </section>
+
+    <section class="pane pane-service">
+      <div class="pane-head">
+        <h2>计划任务</h2>
+        <div class="svc-head">
+          <span class="svc-pill" id="tsvcState">检测中…</span>
+          <button class="mini-btn" id="btnTSvcRefresh" title="重新读取 TraeDailyCheckin 状态" disabled>刷新状态</button>
+        </div>
+      </div>
+      <div class="service-body">
+        <p class="svc-summary" id="tsvcSummary">正在读取 Trae 计划任务状态…</p>
+        <div class="svc-tasks" id="tsvcTasks"></div>
+        <div class="svc-actions">
+          <button class="btn primary" id="btnTSvcInstall" title="注册或更新 TraeDailyCheckin 计划任务" disabled>安装 / 修复</button>
+          <button class="btn ghost" id="btnTSvcEnable" title="恢复按计划自动运行" disabled>启用</button>
+          <button class="btn ghost" id="btnTSvcDisable" title="保留任务但暂停自动运行" disabled>停用</button>
+          <button class="btn ghost" id="btnTSvcRun" title="立即运行一次 Trae 多账号签到" disabled>立即运行</button>
+          <button class="btn ghost" id="btnTSvcStop" title="结束正在运行的 Trae 任务" disabled>停止</button>
+          <button class="btn ghost danger" id="btnTSvcUninstall" title="删除 TraeDailyCheckin 任务" disabled>卸载</button>
+          <span class="svc-hint">独立于 WorkBuddy 与 Qoder 任务</span>
+        </div>
+        <p class="svc-log" id="tsvcLog"></p>
+      </div>
+    </section>
+
+    <section class="row2 trae-row">
+      <div class="pane pane-cal">
+        <div class="pane-head">
+          <h2>签到状态</h2>
+          <span class="growth-updated" id="traeCheckinAt">尚未查询</span>
+        </div>
+        <dl class="kv" id="traeKv">
+          <div><dt>今日签到</dt><dd>—</dd></div>
+          <div><dt>今日获得</dt><dd>—</dd></div>
+          <div><dt>连签天数</dt><dd>—</dd></div>
+          <div><dt>本月签到</dt><dd>—</dd></div>
+          <div><dt>剩余积分</dt><dd>—</dd></div>
+          <div><dt>主账号</dt><dd>—</dd></div>
+        </dl>
+      </div>
+
+      <div class="pane pane-cal">
+        <div class="pane-head">
+          <h2>本月签到</h2>
+          <span class="growth-updated" id="traeCalAt">尚未查询</span>
+        </div>
+        <div class="cal" id="traeCal">
+          <p class="empty">打开此页后显示</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="pane pane-trae-usage">
+      <div class="pane-head">
+        <h2>用量统计</h2>
+        <div class="pane-tools">
+          <select class="mini-select" id="traeUsageDays" title="统计最近多少天的用量">
+            <option value="1">近 1 天</option>
+            <option value="7" selected>近 7 天</option>
+            <option value="30">近 30 天</option>
+            <option value="90">近 90 天</option>
+          </select>
+          <span class="growth-updated" id="traeUsageAt">尚未同步</span>
+          <button class="mini-btn" id="btnTraeUsage" title="从 Trae 拉取当前主账号的会话用量">同步用量</button>
+        </div>
+      </div>
+      <div class="trae-usage-summary" id="traeUsageSummary">
+        <p class="empty">点击「同步用量」后显示积分、Token 与缓存命中</p>
+      </div>
+      <div class="trae-usage-body">
+        <div class="trae-models" id="traeModels"></div>
+        <div class="trae-sessions" id="traeSessions"></div>
+      </div>
+      <p class="trae-expiring" id="traeExpiring"></p>
+    </section>
+
+    <section class="pane pane-trae-history">
+      <div class="pane-head">
+        <h2>签到历史</h2>
+        <span class="growth-updated" id="traeHistoryAt">尚无记录</span>
+      </div>
+      <div class="trae-history" id="traeHistory">
+        <p class="empty">签到成功后会自动写入 SQLite 历史</p>
+      </div>
+    </section>
+
+    <section class="pane pane-log trae-log-pane">
+      <div class="pane-head">
+        <h2>Trae 日志</h2>
+        <div class="log-tools">
+          <span class="growth-updated" id="traeLogAt">尚无日志</span>
+          <button class="mini-btn" id="btnTraeLogClear" title="清空当前显示，不删除日志文件">清空显示</button>
+        </div>
+      </div>
+      <div class="log" id="traeLog"></div>
+    </section>
+  </main>
 </div>
+
+<!-- 添加 / 编辑 Trae 账号 -->
+<dialog class="modal" id="traeAccountDialog">
+  <form class="modal-card" id="traeAccountForm" method="dialog">
+    <div class="modal-head">
+      <h2 id="traeAccountTitle">添加 Trae 账号</h2>
+      <button class="icon-btn" type="button" id="btnTraeAccountClose" aria-label="关闭">×</button>
+    </div>
+    <p class="modal-hint" id="traeAccountHint">支持 Cloud-IDE-JWT Token，或 X-Cloudide-Session 会话 Cookie；两者同时粘贴时优先使用 Token。</p>
+    <label class="field" id="traeCredentialField">
+      <span>Token / 会话 Cookie</span>
+      <textarea id="traeCredential" rows="4" spellcheck="false"
+                placeholder="eyJhbGciOi... 或 X-Cloudide-Session=..."></textarea>
+    </label>
+    <label class="field">
+      <span>备注名（可选）</span>
+      <input id="traeAccountName" type="text" maxlength="60"
+             placeholder="例如：主号 / 小号 1">
+    </label>
+    <div class="field-row">
+      <label class="check"><input type="checkbox" id="traeAccountMember"> 会员（连签额外积分计入）</label>
+      <label class="check"><input type="checkbox" id="traeAccountEnabled" checked> 启用自动签到</label>
+    </div>
+    <p class="form-error" id="traeAccountError"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="btnTraeAccountCancel">取消</button>
+      <button class="btn primary" type="submit" id="btnTraeAccountSave">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Trae 设置 -->
+<dialog class="modal" id="traeSettingsDialog">
+  <form class="modal-card" id="traeSettingsForm" method="dialog">
+    <div class="modal-head">
+      <h2>Trae 设置</h2>
+      <button class="icon-btn" type="button" id="btnTraeSettingsClose" aria-label="关闭">×</button>
+    </div>
+    <p class="modal-hint">计划任务的主签到时间保存在本地；修改后需重新「安装 / 修复」才会应用到 Windows 任务。</p>
+    <div class="field-row">
+      <label class="field">
+        <span>自动签到时间</span>
+        <input id="traeAutoTime" type="time" value="08:05">
+      </label>
+      <label class="field">
+        <span>账号间隔（秒）</span>
+        <input id="traeInterval" type="number" min="0" max="120" value="5">
+      </label>
+      <label class="field">
+        <span>用量统计天数</span>
+        <input id="traeUsageDefaultDays" type="number" min="1" max="90" value="7">
+      </label>
+    </div>
+    <label class="field">
+      <span>飞书机器人 Webhook</span>
+      <input id="traeFeishu" type="password" spellcheck="false"
+             placeholder="留空保持不变；已配置时不会回显">
+    </label>
+    <p class="modal-hint" id="traeFeishuState">尚未配置飞书推送</p>
+    <p class="form-error" id="traeSettingsError"></p>
+    <div class="modal-actions">
+      <button class="btn ghost" type="button" id="btnTraeFeishuClear">清除 Webhook</button>
+      <span class="spacer"></span>
+      <button class="btn ghost" type="button" id="btnTraeSettingsCancel">取消</button>
+      <button class="btn primary" type="submit" id="btnTraeSettingsSave">保存</button>
+    </div>
+  </form>
+</dialog>
 
 <script src="app.js"></script>
 </body>

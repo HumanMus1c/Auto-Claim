@@ -525,11 +525,37 @@ def resolve_session(session):
     return dict(session, auth=dict(session["auth"], accessToken=token))
 
 
+def _mask_value(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= 4:
+        return "*" * len(text)
+    return text[:4] + "…" + text[-4:]
+
+
+def _public_workbuddy_account(session, kind):
+    account = session.get("account") or {}
+    auth = session.get("auth") or {}
+    return {
+        "uid_masked": _mask_value(account.get("uid")),
+        "uin_masked": _mask_value(account.get("uin")),
+        "domain": str(auth.get("domain") or ""),
+        "endpoint": str(auth.get("endpoint") or DEFAULT_ENDPOINT).rstrip("/"),
+        "credential_format": kind,
+        "region": "CN",
+        "region_label": "国内",
+        "region_kind": "cn",
+    }
+
+
 def run_doctor(session):
     _validate_session(session)
     kind = _token_format(session["auth"]["accessToken"])
     out = {"result": "AUTH_READY", "credential_format": kind, "needs_attention": False,
-           "report": "本地凭据格式有效；未验证服务端登录状态", "online_checked": False}
+           "report": "本地凭据格式有效；未验证服务端登录状态", "online_checked": False,
+           "region": "CN", "region_label": "国内", "region_kind": "cn",
+           "account": _public_workbuddy_account(session, kind)}
     if kind == "sym-v1":
         runtime = find_workbuddy_runtime()
         probe = _run_auth_helper(runtime, {"operation": "probe"})

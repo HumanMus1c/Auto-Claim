@@ -62,7 +62,7 @@ class LocateSigninTest(unittest.TestCase):
         sys.frozen = True
         sys._MEIPASS = os.path.join(os.environ.get("TEMP", "/tmp"), "_MEI_FAKE")
         exe_dir = REPO
-        sys.executable = os.path.join(exe_dir, "Auto-claim-dashboard.exe")
+        sys.executable = os.path.join(exe_dir, "Auto-Claim-dashboard.exe")
 
         found = app._locate_signin()
 
@@ -86,7 +86,7 @@ class LocateSigninTest(unittest.TestCase):
         sys.frozen = True
         sys._MEIPASS = os.path.join(os.environ.get("TEMP", "/tmp"), "_MEI_FAKE")
         exe_dir = REPO
-        sys.executable = os.path.join(exe_dir, "Auto-claim-dashboard.exe")
+        sys.executable = os.path.join(exe_dir, "Auto-Claim-dashboard.exe")
 
         app._locate_signin()
 
@@ -138,7 +138,7 @@ class LocateQoderTest(unittest.TestCase):
     def test_frozen_searches_exe_directory_first(self):
         sys.frozen = True
         sys._MEIPASS = os.path.join(os.environ.get("TEMP", "/tmp"), "_MEI_FAKE")
-        sys.executable = os.path.join(REPO, "Auto-claim-dashboard.exe")
+        sys.executable = os.path.join(REPO, "Auto-Claim-dashboard.exe")
 
         found = app._locate_qoder()
 

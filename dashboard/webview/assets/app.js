@@ -44,17 +44,22 @@ const PAGE_KEY = 'wbPage';
 let CURRENT_PAGE = 'workbuddy';
 let QODER_LOADED = false;
 let QODER_LOADING = false;
+let TRAE_LOADED = false;
+let TRAE_LOADING = false;
+let WB_STATUS = null;
+let WB_DOCTOR = null;
+let WB_ACCOUNT_PENDING = null;
 
 function savedPage() {
   try {
     const saved = localStorage.getItem(PAGE_KEY);
-    if (saved === 'qoder') return 'qoder';
+    if (saved === 'qoder' || saved === 'trae') return saved;
   } catch (e) { /* 忽略 */ }
   return 'workbuddy';
 }
 
 function setPage(page) {
-  CURRENT_PAGE = page === 'qoder' ? 'qoder' : 'workbuddy';
+  CURRENT_PAGE = (page === 'qoder' || page === 'trae') ? page : 'workbuddy';
   document.querySelectorAll('.side-tab').forEach((tab) => {
     const active = tab.dataset.page === CURRENT_PAGE;
     tab.classList.toggle('active', active);
@@ -62,10 +67,14 @@ function setPage(page) {
   });
   const wb = $('page-workbuddy');
   const qoder = $('page-qoder');
+  const trae = $('page-trae');
   if (wb) wb.hidden = CURRENT_PAGE !== 'workbuddy';
   if (qoder) qoder.hidden = CURRENT_PAGE !== 'qoder';
+  if (trae) trae.hidden = CURRENT_PAGE !== 'trae';
   try { localStorage.setItem(PAGE_KEY, CURRENT_PAGE); } catch (e) { /* 忽略 */ }
   if (CURRENT_PAGE === 'qoder') ensureQoder();
+  else if (CURRENT_PAGE === 'trae') ensureTrae();
+  else lazyKick();   // 切回监控页时，未加载区块按新的可见性重新判定
 }
 
 function ensureQoder() {
@@ -73,6 +82,13 @@ function ensureQoder() {
   refreshQoder(false);
   refreshQoderService(true);
   scheduleQoderServicePoll();
+}
+
+function ensureTrae() {
+  if (TRAE_LOADED || TRAE_LOADING) return;
+  refreshTrae(false);
+  refreshTraeService(true);
+  scheduleTraeServicePoll();
 }
 
 /* ---------- 主题 ---------- */
@@ -403,16 +419,200 @@ function renderFromStatus(raw) {
 
   // 缓存渲染不写趋势图，否则每次启动都会多出一根重复柱子
   renderCalendar(d);
+  WB_STATUS = d;
+  renderWorkbuddyAccount();
+  wbSideState();
 }
 
 function renderFromDoctor(raw) {
   const d = unwrap(raw);
   if (!d) return;
+  WB_DOCTOR = d;
   const fmt = d.credential_format;
   setCard('vCred', 'hCred',
     fmt === 'plaintext' ? '明文' : fmt === 'sym-v1' ? 'sym-v1 加密' : (fmt || '—'),
     d.electron_version ? 'Electron ' + d.electron_version
       : (d.runtime ? '运行时已就绪' : (d.report || '')));
+  renderWorkbuddyAccount();
+  wbSideState();
+}
+
+function wbCredentialLabel(fmt) {
+  return fmt === 'plaintext' ? '明文' : fmt === 'sym-v1' ? 'sym-v1 加密'
+    : (fmt || '—');
+}
+
+function wbSetDot(kind) {
+  const dot = $('wbDot');
+  if (!dot) return;
+  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+}
+
+/** 侧边栏 WorkBuddy 状态：绿点表示登录态，文字只表示今日签到结果。 */
+function wbSideState() {
+  const hint = $('wbSideHint');
+  if (!hint) return;
+
+  const doctor = WB_DOCTOR;
+  const status = WB_STATUS;
+  let text = '未检测';
+  let kind = '';
+  let title = '';
+
+  if (doctor) {
+    if (doctor.result === 'AUTH_READY') {
+      kind = 'ok';
+      title = 'WorkBuddy 登录态已就绪';
+    } else if (doctor.result === 'NO_AUTH') {
+      kind = 'warn';
+      title = '未找到 WorkBuddy 登录态';
+    } else if (doctor.result === 'AUTH_REJECTED') {
+      kind = 'err';
+      title = 'WorkBuddy 登录态已失效，请重新登录';
+    } else {
+      kind = 'err';
+      title = doctor.report || doctor.result || 'WorkBuddy 登录态异常';
+    }
+  } else if (status) {
+    if (status.result === 'AUTH_REJECTED') {
+      kind = 'err';
+      title = 'WorkBuddy 登录态已失效，请重新登录';
+    } else if (status.result === 'NO_AUTH') {
+      kind = 'warn';
+      title = '未找到 WorkBuddy 登录态';
+    } else {
+      kind = 'ok';
+      title = status.report || '签到状态已更新';
+    }
+  }
+
+  if (status) {
+    const checked = status.today_checked_in === true
+      || status.result === 'ALREADY' || status.result === 'CLAIMED';
+    text = checked ? '已签到' : '未签到';
+  } else if (doctor) {
+    // 登录态已读出但还没查询签到：先按未签到展示，查询完成后自动更正。
+    text = '未签到';
+  }
+
+  hint.textContent = text;
+  hint.title = title;
+  wbSetDot(kind);
+}
+
+function renderWorkbuddyAccount() {
+  const box = $('wbAccounts');
+  if (!box) return;
+  const doctor = WB_DOCTOR;
+  const status = WB_STATUS;
+  box.innerHTML = '';
+
+  if (!doctor && !status) {
+    traeEmpty(box, '正在读取 WorkBuddy 本机登录态…');
+    const at = $('wbAccountAt');
+    if (at) at.textContent = '尚未刷新';
+    return;
+  }
+
+  const account = (doctor && doctor.account) || {};
+  const fmt = (doctor && doctor.credential_format) || account.credential_format || '';
+  const subParts = [];
+  if (account.uin_masked) subParts.push('UIN ' + account.uin_masked);
+  if (account.uid_masked) subParts.push('UID ' + account.uid_masked);
+  if (account.domain) subParts.push(account.domain);
+
+  let stateText = '待检测';
+  let stateKind = 'warn';
+  if (doctor) {
+    if (doctor.result === 'AUTH_READY') {
+      stateText = '已登录';
+      stateKind = 'ok';
+    } else if (doctor.result === 'NO_AUTH') {
+      stateText = '未登录';
+    } else if (doctor.result === 'AUTH_REJECTED') {
+      stateText = '需重新登录';
+      stateKind = 'err';
+    } else {
+      stateText = doctor.result || '登录态异常';
+      stateKind = 'err';
+    }
+  } else if (status && status.result) {
+    stateText = status.result === 'OK' || status.result === 'ALREADY'
+      || status.result === 'CLAIMED' ? '已连接' : status.result;
+    stateKind = stateText === '已连接' ? 'ok' : 'warn';
+  }
+  if (status && status.result === 'AUTH_REJECTED') {
+    stateText = '需重新登录';
+    stateKind = 'err';
+  }
+
+  const card = document.createElement('article');
+  card.className = 'account-card' + (stateKind === 'ok' ? ' active' : '');
+
+  const head = document.createElement('div');
+  head.className = 'ta-head';
+  const identity = document.createElement('div');
+  identity.className = 'ta-identity';
+  const name = document.createElement('div');
+  name.className = 'ta-name';
+  name.textContent = 'WorkBuddy 本机账号';
+  name.title = name.textContent;
+  const sub = document.createElement('div');
+  sub.className = 'ta-sub';
+  sub.textContent = subParts.join(' · ') || '等待读取账号摘要';
+  sub.title = sub.textContent;
+  identity.append(name, sub);
+  head.append(accountAvatarElement('', 'WorkBuddy'), identity,
+    accountStateElement(stateText, stateKind, doctor && doctor.report));
+  card.appendChild(head);
+
+  const credit = status ? firstNum(status.credit, status.today_credit,
+    status.daily_credit) : null;
+  const streak = status ? firstNum(status.streak_days) : null;
+  const checked = !!(status && (status.today_checked_in === true
+    || status.result === 'ALREADY' || status.result === 'CLAIMED'));
+
+  const badges = document.createElement('div');
+  badges.className = 'ta-badges';
+  badges.appendChild(accountRegionBadge(Object.assign({ region: 'CN' }, account)));
+  badges.appendChild(traeBadge('WorkBuddy', 'member'));
+  if (fmt) badges.appendChild(traeBadge(wbCredentialLabel(fmt), ''));
+  card.appendChild(badges);
+
+  const metrics = document.createElement('div');
+  metrics.className = 'ta-metrics';
+  metrics.appendChild(accountMetricElement('今日积分', credit,
+    credit == null ? '尚未查询签到状态' : (checked ? '今日已签到' : '今日未领取')));
+  metrics.appendChild(accountMetricElement('连签天数', streak,
+    streak == null ? '尚未查询签到状态' : '连续签到'));
+  metrics.appendChild(accountMetricElement('凭据', wbCredentialLabel(fmt),
+    doctor && doctor.report ? doctor.report : '本地凭据格式', 'narrow'));
+  card.appendChild(metrics);
+
+  const meta = document.createElement('div');
+  meta.className = 'ta-meta';
+  const endpoint = account.endpoint || '';
+  meta.textContent = '来源 本机 WorkBuddy 登录态'
+    + (endpoint ? ' · ' + endpoint : '');
+  meta.title = endpoint;
+  card.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'ta-actions';
+  actions.appendChild(accountActionButton('签到', '领取今日 WorkBuddy 签到积分（真实写操作，需二次确认）',
+    (e) => wbAccountClaim(e.currentTarget)));
+  actions.appendChild(accountActionButton('刷新', '重新读取 WorkBuddy 本机登录态与签到状态',
+    refreshWorkbuddyAccount));
+  actions.appendChild(accountActionButton('查询签到', '只重新查询 WorkBuddy 签到状态',
+    refreshStatus));
+  card.appendChild(actions);
+
+  box.appendChild(card);
+  const at = $('wbAccountAt');
+  if (at) {
+    at.textContent = '最近读取 '
+      + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  }
 }
 
 /* ---------- 成长中心任务 ---------- */
@@ -770,6 +970,18 @@ function renderGrowth(data, at) {
   box.appendChild(buddyCard.el);
 }
 
+// status/doctor 与 growth 在后端共用 signin 锁：两者同时可见时，先等签到
+// 查询跑完再拉成长中心，否则非阻塞加锁会失败，日志里多一条无意义的报错。
+let CHECKIN_STARTED = false;
+let CHECKIN_DONE = false;
+let GROWTH_WANTED = false;
+
+function maybeLoadGrowth() {
+  if (!GROWTH_WANTED) return;
+  if (CHECKIN_STARTED && !CHECKIN_DONE) return;
+  loadGrowth(true);
+}
+
 function loadGrowth(silent) {
   if (GROWTH_LOADING) return;
   GROWTH_LOADING = true;
@@ -910,6 +1122,12 @@ window.__onBackend = function (kind, data) {
   } else if (kind === 'qoder_done') {
     onQoderDone(data);
 
+  } else if (kind === 'trae_log') {
+    appendTraeLog(data);
+
+  } else if (kind === 'trae_done') {
+    onTraeDone(data);
+
   } else if (kind === 'done') {
     const p = data.payload;
     if (data.action === 'doctor') {
@@ -941,7 +1159,7 @@ let BUSY = false;
 let PENDING = null;      // 等待二次确认的动作 {key, btn}
 
 // 各面板标题栏上的刷新按钮；命令执行期间统一禁用，避免重复触发。
-const PANE_REFRESH_BUTTONS = ['btnGrowthRefresh', 'btnStatusRefresh', 'btnCalRefresh'];
+const PANE_REFRESH_BUTTONS = ['btnGrowthRefresh', 'btnStatusRefresh', 'btnCalRefresh', 'btnWbAccountRefresh'];
 
 function setPaneRefreshDisabled(on) {
   PANE_REFRESH_BUTTONS.forEach((id) => {
@@ -956,6 +1174,8 @@ function setBusy(on) {
     if (!b.classList.contains('confirm')) b.disabled = on;
   });
   setPaneRefreshDisabled(on);
+  if (on) wbSetDot('busy');
+  else wbSideState();
   setBadge(on ? '执行中…' : '就绪', on ? 'busy' : 'ok');
 }
 
@@ -963,6 +1183,39 @@ function setBusy(on) {
 function refreshStatus() {
   if (BUSY) return;
   run('status');
+}
+
+/** WorkBuddy 账号刷新：先重读登录态，再查签到状态，卡片与指标一起更新。 */
+function refreshWorkbuddyAccount() {
+  if (BUSY) return;
+  runSeries(['doctor', 'status']);
+}
+
+function resetWbAccountPending() {
+  if (!WB_ACCOUNT_PENDING) return;
+  const btn = WB_ACCOUNT_PENDING;
+  btn.classList.remove('confirm');
+  btn.textContent = '签到';
+  WB_ACCOUNT_PENDING = null;
+}
+
+/** 账号卡片签到：claim 为真实写操作，沿用二次确认；成功后补一次 status。 */
+function wbAccountClaim(btn) {
+  if (!btn || BUSY) return;
+  if (WB_ACCOUNT_PENDING !== btn) {
+    resetWbAccountPending();
+    WB_ACCOUNT_PENDING = btn;
+    btn.classList.add('confirm');
+    btn.textContent = '确认签到？';
+    appendLog('待确认：再次点击「确认签到」会真实领取今日 WorkBuddy 积分', 'warn');
+    setTimeout(() => {
+      if (WB_ACCOUNT_PENDING === btn) resetWbAccountPending();
+    }, 8000);
+    return;
+  }
+  resetWbAccountPending();
+  appendLog('已确认执行：领取今日 WorkBuddy 签到积分', 'warn');
+  runSeries(['claim', 'status']);
 }
 
 function run(action) {
@@ -1293,7 +1546,8 @@ function scheduleServicePoll() {
   if (SVC_TIMER) clearTimeout(SVC_TIMER);
   const delay = (SERVICE && SERVICE.running) ? 20000 : 180000;
   SVC_TIMER = setTimeout(() => {
-    if (document.hidden) {
+    // 页面不可见、或停在 Qoder 页时不做无用查询：每次刷新都要起 PowerShell
+    if (document.hidden || CURRENT_PAGE !== 'workbuddy') {
       scheduleServicePoll();
       return;
     }
@@ -1396,7 +1650,7 @@ const QODER_SVC_BUTTONS = {
 let QODER_DATA = null;
 let QODER_SERVICE = null;
 let QODER_BUSY = false;
-let QODER_PENDING = false;
+let QODER_PENDING = null;
 let QODER_SVC_BUSY = false;
 let QODER_SVC_PENDING = null;
 let QODER_SVC_REFRESHING = false;
@@ -1434,6 +1688,132 @@ function qoderSetDot(kind) {
   const dot = $('qoderDot');
   if (!dot) return;
   dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+}
+
+function renderQoderAccount(status, doctor) {
+  const box = $('qoderAccounts');
+  if (!box) return;
+  const at = $('qoderAccountAt');
+  box.innerHTML = '';
+
+  if (!status && !doctor) {
+    traeEmpty(box, QODER_DATA && QODER_DATA.error
+      ? 'Qoder 账号不可用：' + QODER_DATA.error
+      : '打开此页或点击「刷新监控」后显示 Qoder CN 账号');
+    if (at) at.textContent = '尚未刷新';
+    return;
+  }
+
+  const account = (doctor && doctor.account) || {};
+  const isEnv = !!(doctor && doctor.token_source === 'env');
+  const display = account.name
+    || (isEnv ? 'Qoder CN 环境变量' : 'Qoder CN 本机账号');
+  const subParts = [];
+  if (account.id) subParts.push('UID ' + account.id);
+  if (account.email_masked) subParts.push(account.email_masked);
+  else if (account.phone_masked) subParts.push(account.phone_masked);
+  if (isEnv) subParts.push('QODER_TOKEN');
+  else if (doctor) subParts.push('桌面端登录态');
+
+  let stateText = '待检测';
+  let stateKind = 'warn';
+  if (doctor) {
+    if (doctor.result === 'OK') {
+      stateText = '已连接';
+      stateKind = 'ok';
+    } else if (doctor.result === 'NO_AUTH') {
+      stateText = '未登录';
+    } else if (doctor.result === 'AUTH_REJECTED') {
+      stateText = '需重新登录';
+      stateKind = 'err';
+    } else {
+      stateText = QODER_RESULT_LABEL[doctor.result] || doctor.result || '登录态异常';
+      stateKind = 'err';
+    }
+  } else if (status && status.result === 'OK') {
+    stateText = '已连接';
+    stateKind = 'ok';
+  }
+  if (status && status.result === 'AUTH_REJECTED') {
+    stateText = '需重新登录';
+    stateKind = 'err';
+  }
+
+  const card = document.createElement('article');
+  card.className = 'account-card' + (stateKind === 'ok' ? ' active' : '');
+
+  const head = document.createElement('div');
+  head.className = 'ta-head';
+  const identity = document.createElement('div');
+  identity.className = 'ta-identity';
+  const name = document.createElement('div');
+  name.className = 'ta-name';
+  name.textContent = display;
+  name.title = display;
+  const sub = document.createElement('div');
+  sub.className = 'ta-sub';
+  sub.textContent = subParts.join(' · ') || 'Qoder CN 本机账号';
+  sub.title = sub.textContent;
+  identity.append(name, sub);
+  head.append(accountAvatarElement(account.avatar_url, display), identity,
+    accountStateElement(stateText, stateKind, doctor && doctor.report));
+  card.appendChild(head);
+
+  const campaigns = (status && status.campaigns) || [];
+  const todo = campaigns.filter((c) => c.active && c.status === 'CLAIMABLE');
+  const claimed = campaigns.filter((c) => c.active && c.status === 'CLAIMED');
+  const credits = todo.length ? qoderSum(todo, 'credits')
+    : (claimed.length ? qoderSum(claimed, 'credits') : null);
+  let creditsHint = status ? '当前没有可领取活动' : '尚未查询活动';
+  if (todo.length) creditsHint = '本周期可领取 · ' + todo.length + ' 项';
+  else if (claimed.length) creditsHint = '本周期已领取 · ' + claimed.length + ' 项';
+  else if (status && status.report) creditsHint = status.report;
+
+  const badges = document.createElement('div');
+  badges.className = 'ta-badges';
+  badges.appendChild(accountRegionBadge(doctor || { region: 'CN' }));
+  badges.appendChild(traeBadge(isEnv ? '环境变量' : 'Qoder CN',
+    isEnv ? 'warn' : 'member'));
+  card.appendChild(badges);
+
+  const metrics = document.createElement('div');
+  metrics.className = 'ta-metrics';
+  metrics.appendChild(accountMetricElement('可领取 Credits', credits, creditsHint));
+  metrics.appendChild(accountMetricElement('令牌到期',
+    doctor && doctor.token_expires_at
+      ? qoderExpiry(doctor.token_expires_at).split(' ')[0] : '未记录',
+    doctor && doctor.token_expires_at
+      ? '到期 ' + qoderExpiry(doctor.token_expires_at) : '未读取到令牌到期时间',
+    'narrow'));
+  metrics.appendChild(accountMetricElement('设备',
+    doctor ? (doctor.device_identity ? '已获取' : '未获取') : '—',
+    doctor && doctor.device_component
+      ? String(doctor.device_component).split(/[\\/]/).pop() : '设备组件未找到',
+    'narrow'));
+  card.appendChild(metrics);
+
+  const meta = document.createElement('div');
+  meta.className = 'ta-meta';
+  const source = isEnv ? '环境变量 QODER_TOKEN'
+    : (doctor && doctor.auth_dir
+      ? String(doctor.auth_dir).split(/[\\/]/).filter(Boolean).pop()
+      : '桌面端登录态');
+  meta.textContent = '来源 ' + source
+    + (QODER_DATA && QODER_DATA.at ? ' · 最近检测 ' + QODER_DATA.at : '');
+  meta.title = (doctor && doctor.auth_dir) || source;
+  card.appendChild(meta);
+
+  const actions = document.createElement('div');
+  actions.className = 'ta-actions';
+  actions.appendChild(accountActionButton('签到', '领取今日 Qoder Credits（真实写操作，需二次确认）',
+    qoderClaim, '', QODER_BUSY));
+  actions.appendChild(accountActionButton('刷新', '重新查询 Qoder 账号与活动',
+    () => refreshQoder(false), '', QODER_BUSY));
+  card.appendChild(actions);
+
+  box.appendChild(card);
+  if (at) at.textContent = QODER_DATA && QODER_DATA.at
+    ? '最近检测 ' + QODER_DATA.at : '尚未刷新';
 }
 
 function renderQoderCards(status, doctor) {
@@ -1586,22 +1966,50 @@ function renderQoderLog(log) {
 function qoderSideState(status, doctor, healthy) {
   const hint = $('qoderSideHint');
   if (!hint) return;
-  let text = '未检测';
   let kind = '';
+  let title = '';
+
   if (healthy) {
-    text = '已连接';
     kind = 'ok';
+  } else if (doctor && doctor.result === 'OK') {
+    kind = 'ok';
+    title = doctor.report || '登录态可读';
   } else if (doctor && doctor.result === 'NO_AUTH') {
-    text = '未登录';
     kind = 'warn';
+    title = '未登录 Qoder CN';
   } else if (doctor && doctor.result === 'AUTH_REJECTED') {
-    text = '需重新登录';
     kind = 'err';
+    title = 'Qoder CN 登录态已失效，请重新登录';
   } else if (status && status.result) {
-    text = QODER_RESULT_LABEL[status.result] || status.result;
     kind = status.result === 'OK' ? 'ok' : 'warn';
+    title = status.report || QODER_RESULT_LABEL[status.result] || status.result;
   }
+
+  // 文字只表示本周期领取结果；绿点单独表示登录 / 连接状态。
+  let text = '未检测';
+  const campaigns = (status && status.campaigns) || [];
+  const todo = campaigns.filter((c) => c.active && c.status === 'CLAIMABLE');
+  const claimed = campaigns.filter((c) => c.active && c.status === 'CLAIMED');
+  if (status) {
+    if (todo.length) {
+      text = '未领取';
+      title = '可领取：' + todo.map((c) => c.campaign || '?').join('、');
+    } else if (claimed.length) {
+      text = '已领取';
+      title = '本周期已领取：' + claimed.map((c) => c.campaign || '?').join('、');
+    } else if (status.result === 'OK') {
+      text = '已领取';
+      title = status.report || '当前没有可领取活动';
+    } else {
+      text = '未领取';
+      title = title || QODER_RESULT_LABEL[status.result] || status.result;
+    }
+  } else if (doctor) {
+    text = '未领取';
+  }
+
   hint.textContent = text;
+  hint.title = title;
   qoderSetDot(kind);
 }
 
@@ -1616,10 +2024,16 @@ function renderQoder(data) {
     setCard('qState', 'qStateHint', '不可用',
       QODER_DATA.error || '请检查 qoder_signin.py 是否存在');
     setCard('qToken', 'qTokenHint', '—', '—');
+    renderQoderAccount(null, null);
     renderQoderCampaigns(null);
     renderQoderLog(QODER_DATA.log);
     const hint = $('qoderSideHint');
-    if (hint) hint.textContent = QODER_DATA.busy ? '领取中' : '不可用';
+    if (hint) {
+      hint.textContent = '未领取';
+      hint.title = QODER_DATA.busy
+        ? '领取正在执行'
+        : (QODER_DATA.error || 'Qoder 监控不可用');
+    }
     qoderSetDot(QODER_DATA.busy ? 'busy' : 'err');
     if (!QODER_DATA.busy) {
       appendQoderLog('Qoder 监控不可用：' + (QODER_DATA.error || '未知错误'), 'err');
@@ -1628,6 +2042,7 @@ function renderQoder(data) {
   }
 
   renderQoderCards(status, doctor);
+  renderQoderAccount(status, doctor);
   renderQoderCampaigns(status);
   renderQoderLog(QODER_DATA.log);
   qoderSideState(status, doctor, !!QODER_DATA.healthy);
@@ -1639,8 +2054,8 @@ function renderQoder(data) {
 function refreshQoder(silent) {
   if (QODER_LOADING) return Promise.resolve();
   QODER_LOADING = true;
-  const btn = $('btnQoderRefresh');
-  if (btn) btn.disabled = true;
+  const btns = [$('btnQoderRefresh'), $('btnQoderAccountRefresh')];
+  btns.forEach((b) => { if (b) b.disabled = true; });
   if (!silent) appendQoderLog('正在读取 Qoder 账号、活动与日志…', 'meta');
   return call('qoder_monitor')
     .then((data) => {
@@ -1654,60 +2069,75 @@ function refreshQoder(silent) {
     })
     .finally(() => {
       QODER_LOADING = false;
-      if (btn) btn.disabled = false;
+      btns.forEach((b) => { if (b) b.disabled = false; });
     });
 }
 
 function qoderResetClaim() {
   if (!QODER_PENDING) return;
-  const btn = $('btnQoderClaim');
+  const { btn, label } = QODER_PENDING;
   if (btn) {
     btn.classList.remove('confirm');
-    btn.textContent = '领取今日 Credits';
+    btn.textContent = label;
   }
-  QODER_PENDING = false;
+  QODER_PENDING = null;
 }
 
-function qoderClaim() {
+function qoderSetClaimBusy(on) {
+  QODER_BUSY = on;
+  const top = $('btnQoderClaim');
+  if (top) top.disabled = on;
+  document.querySelectorAll('#qoderAccounts .mini-btn').forEach((b) => {
+    b.disabled = on;
+  });
+}
+
+function qoderClaim(eventOrBtn) {
   if (QODER_BUSY) return;
-  const btn = $('btnQoderClaim');
-  if (!QODER_PENDING) {
-    QODER_PENDING = true;
-    if (btn) {
-      btn.classList.add('confirm');
-      btn.textContent = '确认领取？点此执行';
-    }
-    appendQoderLog('待确认：再次点击「确认领取」会真实调用 Qoder 领取接口', 'warn');
+  let btn = eventOrBtn;
+  if (btn && btn.currentTarget) btn = btn.currentTarget;   // 顶栏按钮的事件对象
+  if (!btn) btn = $('btnQoderClaim');
+  if (!btn) return;
+  const label = btn.id === 'btnQoderClaim' ? '领取今日 Credits' : '签到';
+  const confirming = btn.id === 'btnQoderClaim';
+  const confirmText = confirming ? '确认领取？点此执行' : '确认签到？点此执行';
+  const confirmLog = confirming
+    ? '待确认：再次点击「确认领取」会真实调用 Qoder 领取接口'
+    : '待确认：再次点击「确认签到」会真实调用 Qoder 领取接口';
+
+  if (!QODER_PENDING || QODER_PENDING.btn !== btn) {
+    qoderResetClaim();
+    QODER_PENDING = { btn, label };
+    btn.classList.add('confirm');
+    btn.textContent = confirmText;
+    appendQoderLog(confirmLog, 'warn');
     setTimeout(qoderResetClaim, 8000);
     return;
   }
 
   qoderResetClaim();
-  QODER_BUSY = true;
-  if (btn) btn.disabled = true;
+  qoderSetClaimBusy(true);
   qoderSetDot('busy');
   appendQoderLog('正在领取 Qoder 今日 Credits…', 'cmd');
   call('qoder_claim')
     .then((r) => {
       if (r && !r.ok) {
-        QODER_BUSY = false;
-        if (btn) btn.disabled = false;
+        qoderSetClaimBusy(false);
         appendQoderLog('领取未启动：' + (r.error || '未知错误'), 'err');
         refreshQoder(true);
       }
     })
     .catch((e) => {
-      QODER_BUSY = false;
-      if (btn) btn.disabled = false;
+      qoderSetClaimBusy(false);
       appendQoderLog('领取调用失败：' + e, 'err');
     });
 }
 
 function onQoderDone(data) {
-  QODER_BUSY = false;
+  qoderResetClaim();
+  qoderSetClaimBusy(false);
   const btn = $('btnQoderClaim');
   if (btn) {
-    btn.disabled = false;
     btn.textContent = '领取今日 Credits';
     btn.classList.remove('confirm');
   }
@@ -1930,6 +2360,1493 @@ function scheduleQoderServicePoll() {
   }, delay);
 }
 
+/* ---------- Trae 多账号监控 ---------- */
+
+const TRAE_RESULT_LABEL = {
+  OK: '已连接',
+  ALREADY: '今日已签到',
+  CLAIMED: '签到成功',
+  PARTIAL: '部分成功',
+  NO_ACCOUNT: '没有账号',
+  NO_AUTH: '登录态失效',
+  NO_CLIENT: '未找到客户端',
+  NO_CHANGE: '没有变化',
+  AUTH_ERROR: '登录态异常',
+  ERROR: '失败',
+};
+
+const TRAE_SVC_BUTTONS = {
+  install: 'btnTSvcInstall',
+  uninstall: 'btnTSvcUninstall',
+  enable: 'btnTSvcEnable',
+  disable: 'btnTSvcDisable',
+  run: 'btnTSvcRun',
+  stop: 'btnTSvcStop',
+};
+
+const TRAE_SVC_ACTION_LABEL = {
+  install: '安装 / 修复',
+  uninstall: '卸载',
+  enable: '启用',
+  disable: '停用',
+  run: '立即运行',
+  stop: '停止',
+};
+
+const TRAE_SVC_CONFIRM = { install: true, uninstall: true };
+const TRAE_OFFSETS = [0, 2, 5, 9, 13];
+
+let TRAE_DATA = null;
+let TRAE_SERVICE = null;
+let TRAE_BUSY = false;
+let TRAE_BUSY_LABEL = '';
+let TRAE_PENDING = false;
+let TRAE_EDIT_ID = null;
+let TRAE_ACCOUNT_PENDING = null;
+let TRAE_SVC_BUSY = false;
+let TRAE_SVC_PENDING = null;
+let TRAE_SVC_REFRESHING = false;
+let TRAE_SVC_TIMER = null;
+let TRAE_SVC_SEQ = 0;
+let TRAE_USAGE_DAYS_SET = false;
+let TRAE_EXPIRING = [];
+let TRAE_EXPIRING_ACCOUNT = null;
+
+function traeNum(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function traeFmt(value, digits) {
+  const n = traeNum(value);
+  if (n === null) return '—';
+  const places = typeof digits === 'number' ? digits : 2;
+  return n.toLocaleString('zh-CN', {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: places,
+  });
+}
+
+function traeLocalDate() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+}
+
+function traeTimeText(ms) {
+  const n = traeNum(ms);
+  if (n === null || n <= 0) return '—';
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return String(ms);
+  return d.toLocaleString('zh-CN', { hour12: false });
+}
+
+function traeSetDot(kind) {
+  const dot = $('traeDot');
+  if (!dot) return;
+  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+}
+
+function traeActive(data) {
+  const source = data || TRAE_DATA || {};
+  const accounts = source.accounts || [];
+  return accounts.find((a) => a.id === source.active_id) || accounts[0] || null;
+}
+
+function traeAccountById(id) {
+  const accounts = (TRAE_DATA && TRAE_DATA.accounts) || [];
+  return accounts.find((a) => a.id === id) || null;
+}
+
+function traeToday() {
+  return (TRAE_DATA && TRAE_DATA.history && TRAE_DATA.history.today)
+    || traeLocalDate();
+}
+
+function traeIsChecked(account, today) {
+  if (!account) return false;
+  if (account.last_checkin === today) return true;
+  const status = account.last_status || {};
+  return status.checked_in === true
+    && String(status.at || '').slice(0, 10) === today;
+}
+
+function traeAccountGain(account, today) {
+  if (!account) return 0;
+  if (TRAE_DATA && TRAE_DATA.active_id === account.id
+      && TRAE_DATA.history
+      && TRAE_DATA.history.today === today) {
+    return traeNum(TRAE_DATA.history.today_credits) || 0;
+  }
+  const status = account.last_status || {};
+  if (!status.checked_in) return 0;
+  let gained = traeNum(status.credits) || 0;
+  if (account.is_member) gained += traeNum(status.extra_credits) || 0;
+  return gained;
+}
+
+function traeSourceLabel(source) {
+  if (!source) return '手动添加';
+  if (/solo/i.test(source)) return 'TRAE SOLO 客户端';
+  if (/trae cn/i.test(source)) return 'Trae CN 客户端';
+  if (/trae/i.test(source)) return 'Trae 客户端';
+  return source;
+}
+
+function traeResultLabel(result) {
+  return TRAE_RESULT_LABEL[result] || result || '完成';
+}
+
+function traeEmpty(box, text) {
+  if (!box) return;
+  box.innerHTML = '';
+  const p = document.createElement('p');
+  p.className = 'empty';
+  p.textContent = text;
+  box.appendChild(p);
+}
+
+function traeBadge(text, kind) {
+  const el = document.createElement('span');
+  el.className = 'ta-badge' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  return el;
+}
+
+function accountInitial(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text ? Array.from(text)[0].toUpperCase() : 'A';
+}
+
+function accountAvatarElement(url, display) {
+  const el = document.createElement('span');
+  el.className = 'ta-avatar';
+  const initial = accountInitial(display);
+  if (url) {
+    const img = document.createElement('img');
+    img.alt = '';
+    img.loading = 'lazy';
+    img.referrerPolicy = 'no-referrer';
+    img.src = url;
+    img.addEventListener('error', () => {
+      img.remove();
+      el.textContent = initial;
+    });
+    el.appendChild(img);
+  } else {
+    el.textContent = initial;
+  }
+  return el;
+}
+
+function accountStateElement(text, kind, title) {
+  const el = document.createElement('span');
+  el.className = 'ta-state' + (kind ? ' ' + kind : '');
+  el.textContent = text;
+  el.title = title || '';
+  return el;
+}
+
+function accountMetricElement(label, value, hint, cls) {
+  const item = document.createElement('div');
+  item.className = 'ta-metric' + (cls ? ' ' + cls : '');
+  const key = document.createElement('span');
+  key.textContent = label;
+  const val = document.createElement('b');
+  val.textContent = value == null || value === '' ? '—' : String(value);
+  val.title = hint || '';
+  item.append(key, val);
+  return item;
+}
+
+function accountRegionInfo(account) {
+  const region = String((account && account.region) || '').toUpperCase();
+  // 旧缓存可能只有 label / 没有 region；默认按国内展示，避免空区域被
+  // 误判成国际后出现「橙色国内」这种自相矛盾的徽标。
+  const intl = !!region && region !== 'CN';
+  const kind = (account && account.region_kind) || (intl ? 'intl' : 'cn');
+  const label = (account && account.region_label) || (intl ? '国际' : '国内');
+  return { region, kind, label, host: (account && account.host) || '' };
+}
+
+function accountRegionBadge(account) {
+  const info = accountRegionInfo(account);
+  const el = traeBadge(info.label, 'region-' + info.kind);
+  el.title = info.host ? info.label + ' · ' + info.host : info.label;
+  return el;
+}
+
+function accountActionButton(label, title, onClick, extraClass, disabled) {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'mini-btn' + (extraClass ? ' ' + extraClass : '');
+  btn.textContent = label;
+  btn.title = title || label;
+  btn.disabled = !!disabled;
+  if (typeof onClick === 'function' && typeof btn.addEventListener === 'function') {
+    btn.addEventListener('click', onClick);
+  }
+  return btn;
+}
+
+function traeSideState() {
+  const hint = $('traeSideHint');
+  if (!hint) return;
+
+  // 绿点只表示登录 / 连接状态；文字统一为今日签到结果。
+  let text = '未检测';
+  let kind = '';
+  let title = '';
+
+  if (TRAE_DATA && TRAE_DATA.ok === false) {
+    text = '未签到';
+    kind = 'err';
+    title = TRAE_DATA.error || 'Trae 监控不可用';
+  } else if (TRAE_DATA) {
+    const accounts = TRAE_DATA.accounts || [];
+    const enabled = accounts.filter((a) => a.enabled);
+    if (!accounts.length) {
+      text = '未签到';
+      kind = 'warn';
+      title = '未添加 Trae 账号';
+    } else if (!enabled.length) {
+      text = '未签到';
+      kind = 'warn';
+      title = 'Trae 账号均已停用';
+    } else {
+      const today = traeToday();
+      const checked = enabled.filter((a) => traeIsChecked(a, today)).length;
+      const broken = enabled.filter((a) => a.token_expired && !a.has_session);
+      text = checked >= enabled.length ? '已签到' : '未签到';
+      title = '今日已签 ' + checked + '/' + enabled.length;
+      if (broken.length === enabled.length) {
+        kind = 'err';
+        title = '登录态已过期 · ' + title;
+      } else if (broken.length) {
+        kind = 'warn';
+        title = broken.length + ' 个账号登录态已过期 · ' + title;
+      } else {
+        kind = 'ok';
+      }
+    }
+  }
+
+  if (TRAE_BUSY) kind = 'busy';
+  hint.textContent = text;
+  hint.title = title;
+  traeSetDot(kind);
+}
+
+function renderTraeCards(data) {
+  const active = traeActive(data);
+  const history = data.history || null;
+  const accounts = data.accounts || [];
+  const enabled = accounts.filter((a) => a.enabled);
+  const today = (history && history.today) || traeToday();
+  const checked = enabled.filter((a) => traeIsChecked(a, today)).length;
+
+  if (!active) {
+    setCard('tToday', 'tTodayHint', '—', '添加账号后显示');
+    setCard('tRemaining', 'tRemainingHint', '—', '添加账号后显示');
+  } else {
+    const todayCredits = history ? history.today_credits : 0;
+    setCard('tToday', 'tTodayHint', traeFmt(todayCredits),
+      traeIsChecked(active, today) ? '主号今日已签到' : '主号今日未签到');
+    setCard('tRemaining', 'tRemainingHint', traeFmt(active.remaining),
+      active.display + (accounts.length > 1 ? ' · 共 ' + accounts.length + ' 个账号' : ''));
+  }
+
+  setCard('tAccounts', 'tAccountsHint', enabled.length,
+    '共 ' + accounts.length + ' 个账号 · 今日已签 ' + checked + ' 个');
+}
+
+function renderTraeAccounts(data) {
+  const box = $('traeAccounts');
+  if (!box) return;
+  const accounts = data.accounts || [];
+  box.innerHTML = '';
+
+  if (!accounts.length) {
+    const clients = data.clients || [];
+    if (clients.length) {
+      const names = clients.map((c) => c.name).join('、');
+      traeEmpty(box, '检测到本机客户端（' + names + '），但尚未导入登录态。'
+        + '点击「导入本机登录态」，或「添加账号」粘贴 Token / 会话 Cookie。');
+    } else {
+      traeEmpty(box, '还没有 Trae 账号。安装并登录 Trae 桌面端后可导入本机登录态，'
+        + '也可以直接粘贴 Cloud-IDE-JWT Token 或 X-Cloudide-Session。');
+    }
+    return;
+  }
+
+  const today = traeToday();
+  accounts.forEach((account) => {
+    const checked = traeIsChecked(account, today);
+    const status = account.last_status || {};
+    const card = document.createElement('article');
+    card.className = 'account-card trae-account'
+      + (account.active ? ' active' : '')
+      + (account.enabled ? '' : ' disabled');
+
+    const head = document.createElement('div');
+    head.className = 'ta-head';
+
+    const display = account.display || account.name || 'Trae';
+    const avatar = accountAvatarElement(account.avatar_url, display);
+
+    const identity = document.createElement('div');
+    identity.className = 'ta-identity';
+    const name = document.createElement('div');
+    name.className = 'ta-name';
+    name.textContent = display;
+    name.title = display;
+    const sub = document.createElement('div');
+    sub.className = 'ta-sub';
+    sub.textContent = traeSourceLabel(account.source)
+      + (account.mobile_masked ? ' · ' + account.mobile_masked : '');
+    identity.append(name, sub);
+
+    let stateText = checked ? '今日已签' : '待签到';
+    let stateKind = checked ? 'ok' : 'warn';
+    if (!account.enabled) {
+      stateText = '已停用';
+      stateKind = 'off';
+    } else if (status.code !== undefined && status.code !== null && status.code !== 0
+               && status.code !== '' && Number(status.code) !== 0) {
+      stateText = '登录态异常';
+      stateKind = 'err';
+    }
+    const state = accountStateElement(stateText, stateKind, status.message || '');
+
+    head.append(avatar, identity, state);
+    card.appendChild(head);
+
+    const badges = document.createElement('div');
+    badges.className = 'ta-badges';
+    badges.appendChild(accountRegionBadge(account));
+    if (account.active) badges.appendChild(traeBadge('主号', 'main'));
+    if (account.is_member) badges.appendChild(traeBadge('会员', 'member'));
+    if (account.is_student) badges.appendChild(traeBadge('学生', 'student'));
+    if (account.token_expired) {
+      badges.appendChild(traeBadge(account.has_session ? 'Token 可续期' : '需重新登录',
+        account.has_session ? 'warn' : 'err'));
+    }
+    if (badges.childElementCount) card.appendChild(badges);
+
+    const metrics = document.createElement('div');
+    metrics.className = 'ta-metrics';
+    metrics.appendChild(accountMetricElement('剩余积分', traeFmt(account.remaining),
+      account.remaining == null ? '尚未刷新剩余积分' : '最近一次查询结果'));
+    metrics.appendChild(accountMetricElement('今日获得', '+' + traeFmt(traeAccountGain(account, today)),
+      checked ? '来自今日签到记录' : '今日尚未签到'));
+    metrics.appendChild(accountMetricElement('Token 到期',
+      account.token_expiry ? String(account.token_expiry).slice(0, 10) : '未记录',
+      account.token_expiry || 'Token 中没有到期时间', 'narrow'));
+    card.appendChild(metrics);
+
+    const meta = document.createElement('div');
+    meta.className = 'ta-meta';
+    const metaParts = [
+      '设备 ' + (account.device_id_masked || '—'),
+      '最近签到 ' + (account.last_checkin || '—'),
+    ];
+    meta.textContent = metaParts.join(' · ');
+    card.appendChild(meta);
+
+    const actions = document.createElement('div');
+    actions.className = 'ta-actions';
+    const addAction = (action, label, title, extraClass, disabled) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mini-btn' + (extraClass ? ' ' + extraClass : '');
+      btn.dataset.traeAction = action;
+      btn.dataset.traeId = account.id;
+      const armed = TRAE_ACCOUNT_PENDING
+        && TRAE_ACCOUNT_PENDING.action === action
+        && TRAE_ACCOUNT_PENDING.id === account.id;
+      btn.textContent = armed
+        ? (action === 'remove' ? '确认删除？'
+          : action === 'renew_device' ? '确认换设备？' : '确认签到？')
+        : label;
+      if (armed) btn.classList.add('confirm');
+      btn.title = title || label;
+      btn.disabled = !!disabled || TRAE_BUSY;
+      actions.appendChild(btn);
+      return btn;
+    };
+
+    addAction('checkin', checked ? '已签到' : '签到',
+      checked ? '今天已经签到' : '立即签到这个账号',
+      '', !account.enabled || checked || !account.has_token && !account.has_session);
+    addAction('refresh', '刷新', '查询状态、资料和剩余积分');
+    if (!account.active) addAction('activate', '设为主号', '切换主号，用于日历与用量统计');
+    addAction('edit', '编辑', '修改备注名、会员标记或启用状态');
+    addAction('renew_device', '换设备', '重新生成 16 位数字设备号，可能影响服务端风控');
+    addAction('toggle', account.enabled ? '停用' : '启用',
+      account.enabled ? '保留账号但不再自动签到' : '恢复自动签到');
+    addAction('remove', '删除', '从本机删除这个账号（需要二次确认）', 'danger');
+
+    card.appendChild(actions);
+    box.appendChild(card);
+  });
+}
+
+function renderTraeKv(data) {
+  const kv = $('traeKv');
+  if (!kv) return;
+  const active = traeActive(data);
+  const history = data.history || null;
+  const today = (history && history.today) || traeToday();
+  const checked = history ? history.today_checked : (active ? traeIsChecked(active, today) : false);
+  const rows = [
+    checked ? '是' : '否',
+    traeFmt(history ? history.today_credits : 0),
+    history ? history.streak + ' 天' : '—',
+    history ? history.month_signed_days + ' 天' : '—',
+    active ? traeFmt(active.remaining) : '—',
+    active ? active.display : '—',
+  ];
+  const dds = kv.querySelectorAll('dd');
+  dds.forEach((dd, i) => {
+    dd.textContent = rows[i] == null || rows[i] === '' ? '—' : String(rows[i]);
+    dd.title = rows[i] == null ? '' : String(rows[i]);
+  });
+  const at = $('traeCheckinAt');
+  if (at) at.textContent = data.at ? '本地记录 · ' + data.at : '尚未查询';
+}
+
+function renderTraeCalendar(data) {
+  const box = $('traeCal');
+  if (!box) return;
+  const active = traeActive(data);
+  const history = data.history || null;
+  const at = $('traeCalAt');
+  if (!active || !history) {
+    traeEmpty(box, '添加账号并签到后显示本月日历');
+    if (at) at.textContent = '尚未查询';
+    return;
+  }
+
+  const today = history.today || traeLocalDate();
+  const parts = today.split('-').map(Number);
+  const year = parts[0];
+  const month = parts[1];
+  const first = new Date(year, month - 1, 1);
+  const days = new Date(year, month, 0).getDate();
+  const lead = first.getDay();
+  const rows = Math.ceil((lead + days) / 7);
+  const signed = new Set((history.signed_dates || []).map(String));
+  const prefix = today.slice(0, 7);
+
+  box.innerHTML = '';
+  const head = document.createElement('div');
+  head.className = 'cal-head';
+  ['日', '一', '二', '三', '四', '五', '六'].forEach((w) => {
+    const s = document.createElement('span');
+    s.textContent = w;
+    head.appendChild(s);
+  });
+  box.appendChild(head);
+
+  const grid = document.createElement('div');
+  grid.className = 'cal-grid';
+  grid.style.setProperty('--cal-rows', rows);
+  for (let i = 0; i < lead; i++) grid.appendChild(document.createElement('i'));
+  const pad = (n) => String(n).padStart(2, '0');
+  for (let d = 1; d <= days; d++) {
+    const iso = year + '-' + pad(month) + '-' + pad(d);
+    const cell = document.createElement('div');
+    cell.className = 'cal-day';
+    cell.textContent = d;
+    if (signed.has(iso)) cell.classList.add('on');
+    if (iso === today) cell.classList.add('today');
+    if (iso > today) cell.classList.add('future');
+    cell.title = iso + (signed.has(iso) ? ' · 已签到' : ' · 未签到');
+    grid.appendChild(cell);
+  }
+  box.appendChild(grid);
+
+  const foot = document.createElement('div');
+  foot.className = 'cal-foot';
+  const legend = document.createElement('span');
+  legend.className = 'cal-legend';
+  const dot = document.createElement('b');
+  dot.className = 'on';
+  legend.append(dot, '已签到');
+  const count = document.createElement('span');
+  const monthCount = (history.signed_dates || [])
+    .filter((s) => String(s).startsWith(prefix)).length;
+  count.textContent = '本月 ' + monthCount + ' 天 · 连签 ' + (history.streak || 0) + ' 天';
+  const week = document.createElement('span');
+  week.className = 'weekdots';
+  (history.week_progress || []).forEach((on, i) => {
+    const b = document.createElement('b');
+    if (on) b.classList.add('on');
+    b.title = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][i];
+    week.appendChild(b);
+  });
+  foot.append(legend, count, week);
+  box.appendChild(foot);
+  if (at) at.textContent = active.display + ' · ' + today;
+}
+
+function traeTable(headers, rows, emptyText) {
+  const wrap = document.createElement('div');
+  wrap.className = 'trae-table-wrap';
+  if (!rows.length) {
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.textContent = emptyText;
+    wrap.appendChild(p);
+    return wrap;
+  }
+
+  const table = document.createElement('table');
+  table.className = 'trae-table';
+  const thead = document.createElement('thead');
+  const tr = document.createElement('tr');
+  headers.forEach((text) => {
+    const th = document.createElement('th');
+    th.textContent = text;
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach((row) => {
+    const bodyRow = document.createElement('tr');
+    row.forEach((value, index) => {
+      const td = document.createElement('td');
+      const cell = value && typeof value === 'object' ? value : { text: value };
+      td.textContent = cell.text == null || cell.text === '' ? '—' : String(cell.text);
+      if (cell.title) td.title = cell.title;
+      if (cell.cls) td.className = cell.cls;
+      if (index === row.length - 1 && cell.ellipsis) td.classList.add('ellipsis');
+      bodyRow.appendChild(td);
+    });
+    tbody.appendChild(bodyRow);
+  });
+  table.appendChild(tbody);
+  wrap.appendChild(table);
+  return wrap;
+}
+
+function renderTraeHistory(data) {
+  const box = $('traeHistory');
+  if (!box) return;
+  const active = traeActive(data);
+  const history = data.history || null;
+  const records = (history && history.records) || [];
+  const at = $('traeHistoryAt');
+
+  if (!active) {
+    traeEmpty(box, '签到成功后会自动写入 SQLite 历史');
+    if (at) at.textContent = '尚无记录';
+    return;
+  }
+  if (!records.length) {
+    traeEmpty(box, '主号还没有签到记录。第一次签到成功后会写入本地 SQLite。');
+    if (at) at.textContent = active.display + ' · 尚无记录';
+    return;
+  }
+
+  box.innerHTML = '';
+  records.forEach((record) => {
+    const row = document.createElement('div');
+    row.className = 'trae-hist-row';
+    const date = document.createElement('span');
+    date.className = 'trae-hist-date';
+    date.textContent = (record.date || '—') + ' ' + (record.time || '');
+    const name = document.createElement('span');
+    name.className = 'trae-hist-name';
+    name.textContent = record.account_name || active.display;
+    name.title = name.textContent;
+    if (record.is_member) {
+      const member = document.createElement('small');
+      member.textContent = '会员';
+      name.appendChild(member);
+    }
+    const credit = document.createElement('span');
+    credit.className = 'trae-hist-credit';
+    credit.textContent = '+' + traeFmt(record.credits);
+    row.append(date, name, credit);
+    box.appendChild(row);
+  });
+  if (at) at.textContent = active.display + ' · ' + records.length + ' 条';
+}
+
+function renderTraeUsage(data) {
+  const active = traeActive(data);
+  const usage = data.usage || null;
+  const summary = $('traeUsageSummary');
+  const models = $('traeModels');
+  const sessions = $('traeSessions');
+  const at = $('traeUsageAt');
+  const expiring = $('traeExpiring');
+  if (!summary || !models || !sessions) return;
+
+  if (!active) {
+    TRAE_EXPIRING = [];
+    TRAE_EXPIRING_ACCOUNT = null;
+  } else if (TRAE_EXPIRING_ACCOUNT && TRAE_EXPIRING_ACCOUNT !== active.id) {
+    TRAE_EXPIRING = [];
+    TRAE_EXPIRING_ACCOUNT = null;
+  }
+  if (active && usage && Array.isArray(usage.expiring)) {
+    TRAE_EXPIRING = usage.expiring;
+    TRAE_EXPIRING_ACCOUNT = active.id;
+  }
+
+  if (!active) {
+    traeEmpty(summary, '添加 Trae 账号后显示用量');
+    models.innerHTML = '';
+    sessions.innerHTML = '';
+    if (expiring) {
+      expiring.textContent = '';
+      expiring.className = 'trae-expiring';
+    }
+    if (at) at.textContent = '尚未同步';
+    return;
+  }
+
+  if (!TRAE_USAGE_DAYS_SET && usage && usage.days) {
+    const select = $('traeUsageDays');
+    if (select) select.value = String(usage.days);
+  }
+
+  summary.innerHTML = '';
+  if (!usage || !usage.has_data) {
+    traeEmpty(summary, '本地还没有用量记录。选择天数后点击「同步用量」，'
+      + '会从 Trae 拉取主号的会话、Token 与缓存命中数据。');
+    models.innerHTML = '';
+    sessions.innerHTML = '';
+  } else {
+    const stats = [
+      ['会话数', traeFmt(usage.sessions_count, 0), '近 ' + usage.days + ' 天'],
+      ['消耗积分', traeFmt(usage.credits), 'Credits'],
+      ['输入 Token', traeFmt(usage.input_token, 0), '含缓存读取'],
+      ['输出 Token', traeFmt(usage.output_token, 0), '模型生成'],
+      ['缓存命中', traeFmt(usage.cache_rate, 1) + '%', '只读缓存占比'],
+    ];
+    stats.forEach(([label, value, hint]) => {
+      const item = document.createElement('div');
+      item.className = 'trae-stat';
+      const key = document.createElement('span');
+      key.textContent = label;
+      const val = document.createElement('b');
+      val.textContent = value;
+      const note = document.createElement('small');
+      note.textContent = hint;
+      item.append(key, val, note);
+      summary.appendChild(item);
+    });
+
+    const modelRows = (usage.models || []).map((m) => ([
+      m.model || '未知模型',
+      traeFmt(m.sessions, 0),
+      traeFmt(m.credits),
+      traeFmt(m.input_token, 0),
+      traeFmt(m.output_token, 0),
+      traeFmt(m.cache_read_token, 0),
+    ]));
+    models.innerHTML = '';
+    const modelsTitle = document.createElement('h3');
+    modelsTitle.className = 'trae-table-title';
+    modelsTitle.textContent = '按模型';
+    models.appendChild(modelsTitle);
+    models.appendChild(traeTable(
+      ['模型', '会话', '积分', '输入', '输出', '缓存读'],
+      modelRows, '近 ' + usage.days + ' 天没有模型用量'));
+
+    const sessionRows = (usage.sessions || []).map((s) => ([
+      traeTimeText(s.usage_time),
+      s.model || '—',
+      traeFmt(s.credits),
+      traeFmt(s.input_token, 0) + ' / ' + traeFmt(s.output_token, 0),
+      {
+        text: s.preview || '—',
+        title: s.preview || '',
+        ellipsis: true,
+      },
+    ]));
+    sessions.innerHTML = '';
+    const sessionsTitle = document.createElement('h3');
+    sessionsTitle.className = 'trae-table-title';
+    sessionsTitle.textContent = '最近会话';
+    sessions.appendChild(sessionsTitle);
+    sessions.appendChild(traeTable(
+      ['时间', '模型', '积分', '输入 / 输出', '摘要'],
+      sessionRows, '近 ' + usage.days + ' 天没有会话记录'));
+  }
+
+  if (at) {
+    at.textContent = usage && usage.at
+      ? (usage.account && usage.account.name ? usage.account.name + ' · ' : '')
+        + usage.at
+      : (active.last_usage_at ? '本地缓存 · 最近同步 ' + active.last_usage_at : '尚未同步');
+  }
+
+  if (expiring) {
+    expiring.className = 'trae-expiring';
+    expiring.innerHTML = '';
+    if (!TRAE_EXPIRING.length) {
+      expiring.textContent = '近期没有即将过期的积分包。';
+    } else {
+      const label = document.createElement('b');
+      label.textContent = '即将过期：';
+      expiring.appendChild(label);
+      TRAE_EXPIRING.forEach((item, index) => {
+        if (index) expiring.appendChild(document.createTextNode('；'));
+        const span = document.createElement('span');
+        const when = traeTimeText(item.expire_time);
+        span.textContent = (item.name || '积分包') + ' '
+          + traeFmt(item.credits) + ' 分 · ' + when
+          + (item.expired ? '（已过期）' : '');
+        span.className = item.expired ? 'expired' : 'soon';
+        expiring.appendChild(span);
+      });
+    }
+  }
+}
+
+function appendTraeLog(text, kind) {
+  const box = $('traeLog');
+  if (!box) return;
+  kind = kind || classify(text);
+  const spec = LOG_KINDS[kind] || LOG_KINDS.info;
+  const row = document.createElement('div');
+  row.className = 'line t-' + kind;
+
+  const ico = document.createElement('span');
+  ico.className = 'ico';
+  ico.textContent = spec.ico;
+
+  const txt = document.createElement('span');
+  txt.className = 'txt';
+  txt.textContent = text;
+
+  row.append(ico, txt);
+  box.appendChild(row);
+  while (box.childElementCount > 400) box.removeChild(box.firstChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderTraeLog(log) {
+  const box = $('traeLog');
+  if (!box) return;
+  box.innerHTML = '';
+  ((log && log.lines) || []).forEach((line) => appendTraeLog(line));
+  const at = $('traeLogAt');
+  if (at) at.textContent = log && log.at ? '最近写入 ' + log.at : '尚无日志';
+}
+
+function renderTrae(data) {
+  TRAE_DATA = data || {};
+  const ok = TRAE_DATA.ok !== false;
+
+  if (!ok) {
+    setCard('tToday', 'tTodayHint', '—', '无法读取');
+    setCard('tRemaining', 'tRemainingHint', '—', '无法读取');
+    setCard('tAccounts', 'tAccountsHint', '—', '无法读取');
+    traeSideState();
+    traeEmpty($('traeAccounts'),
+      'Trae 监控不可用：' + (TRAE_DATA.error || '未知错误'));
+    traeEmpty($('traeCal'), 'Trae 监控不可用');
+    traeEmpty($('traeUsageSummary'), 'Trae 监控不可用');
+    traeEmpty($('traeHistory'), 'Trae 监控不可用');
+    $('traeModels').innerHTML = '';
+    $('traeSessions').innerHTML = '';
+    $('traeExpiring').textContent = '';
+    renderTraeLog(TRAE_DATA.log);
+    if (!TRAE_DATA.busy && TRAE_DATA.error) {
+      appendTraeLog('Trae 监控不可用：' + TRAE_DATA.error, 'err');
+    }
+    setTraeAvailability(false);
+    return;
+  }
+
+  const active = traeActive(TRAE_DATA);
+  const history = TRAE_DATA.history || null;
+  renderTraeCards(TRAE_DATA);
+  renderTraeAccounts(TRAE_DATA);
+  renderTraeKv(TRAE_DATA);
+  renderTraeCalendar(TRAE_DATA);
+  renderTraeHistory(TRAE_DATA);
+  renderTraeUsage(TRAE_DATA);
+  renderTraeLog(TRAE_DATA.log);
+
+  const select = $('traeUsageDays');
+  const settings = TRAE_DATA.settings || {};
+  if (select && !TRAE_USAGE_DAYS_SET) {
+    select.value = String((history && history.days) || (TRAE_DATA.usage && TRAE_DATA.usage.days)
+      || settings.usage_days || 7);
+  }
+  const accountsAt = $('traeAccountsAt');
+  if (accountsAt) {
+    accountsAt.textContent = TRAE_DATA.at
+      ? '刷新于 ' + TRAE_DATA.at
+      : '尚未刷新';
+  }
+  const hint = $('traeHint');
+  if (hint) {
+    hint.textContent = '刷新监控只读；一键签到与账号操作会真实改动本地账号或服务端签到状态。'
+      + (active ? ' 当前主号：' + active.display : '');
+    hint.title = TRAE_DATA.data_dir ? '数据目录：' + TRAE_DATA.data_dir : '';
+  }
+
+  setTraeAvailability(true);
+  if (TRAE_DATA.busy) {
+    TRAE_BUSY = true;
+    TRAE_BUSY_LABEL = '任务执行中';
+    setTraeBusy(true, TRAE_BUSY_LABEL);
+  }
+  traeSideState();
+}
+
+function refreshTrae(silent) {
+  if (TRAE_LOADING) return Promise.resolve();
+  TRAE_LOADING = true;
+  const btn = $('btnTraeRefresh');
+  if (btn) btn.disabled = true;
+  if (!silent) appendTraeLog('正在读取 Trae 账号、签到历史、用量与日志…', 'meta');
+  return call('trae_monitor')
+    .then((data) => {
+      if (data && data.busy && TRAE_DATA && !(data.accounts || []).length) {
+        TRAE_DATA.log = data.log || TRAE_DATA.log;
+        TRAE_DATA.busy = true;
+        renderTraeLog(TRAE_DATA.log);
+        traeSideState();
+        return;
+      }
+      TRAE_LOADED = true;
+      renderTrae(data);
+    })
+    .catch((e) => {
+      TRAE_LOADED = true;
+      renderTrae({ ok: false, error: String(e), log: null });
+      appendTraeLog('刷新 Trae 监控失败：' + e, 'err');
+    })
+    .finally(() => {
+      TRAE_LOADING = false;
+      if (btn) btn.disabled = false;
+    });
+}
+
+function setTraeAvailability(on) {
+  const ids = ['btnTraeCheckin', 'btnTraeImport', 'btnTraeAdd',
+    'btnTraeSettings', 'btnTraeAccountsRefresh', 'btnTraeUsage'];
+  ids.forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.disabled = !on;
+  });
+  if (!on) {
+    document.querySelectorAll('#traeAccounts [data-trae-action]').forEach((b) => {
+      b.disabled = true;
+    });
+  }
+}
+
+function setTraeBusy(on, label) {
+  TRAE_BUSY = !!on;
+  TRAE_BUSY_LABEL = on ? (label || '处理中') : '';
+  const ids = ['btnTraeCheckin', 'btnTraeImport', 'btnTraeAdd',
+    'btnTraeSettings', 'btnTraeAccountsRefresh', 'btnTraeUsage'];
+  const available = !!(TRAE_DATA && TRAE_DATA.ok !== false);
+  ids.forEach((id) => {
+    const btn = $(id);
+    if (btn) btn.disabled = !available || on;
+  });
+  document.querySelectorAll('#traeAccounts [data-trae-action]').forEach((b) => {
+    b.disabled = on;
+  });
+  if (on) traeSetDot('busy');
+  else traeSideState();
+}
+
+function traeResetCheckin() {
+  if (!TRAE_PENDING) return;
+  const btn = $('btnTraeCheckin');
+  if (btn) {
+    btn.classList.remove('confirm');
+    btn.textContent = '一键签到';
+  }
+  TRAE_PENDING = false;
+}
+
+function traeCheckin() {
+  if (TRAE_BUSY) return;
+  const btn = $('btnTraeCheckin');
+  if (!TRAE_PENDING) {
+    TRAE_PENDING = true;
+    if (btn) {
+      btn.classList.add('confirm');
+      btn.textContent = '确认签到？点此执行';
+    }
+    appendTraeLog('待确认：再次点击会真实调用 Trae 签到接口，逐个账号签到', 'warn');
+    setTimeout(traeResetCheckin, 8000);
+    return;
+  }
+  traeResetCheckin();
+  startTraeTask('checkin', null);
+}
+
+function startTraeTask(kind, accountId, days) {
+  if (TRAE_BUSY) return;
+  const labels = {
+    checkin: '正在签到',
+    refresh: '正在刷新账号状态',
+    usage: '正在同步用量',
+    import: '正在导入本机登录态',
+  };
+  const label = labels[kind] || kind;
+  setTraeBusy(true, label + '…');
+  appendTraeLog(label + '…', 'cmd');
+
+  let request;
+  if (kind === 'checkin') request = call('trae_checkin', accountId || null);
+  else if (kind === 'refresh') request = call('trae_refresh', accountId || null);
+  else if (kind === 'usage') request = call('trae_usage', accountId || null, days || null);
+  else if (kind === 'import') request = call('trae_import');
+  else request = Promise.reject(new Error('未知操作：' + kind));
+
+  return request
+    .then((r) => {
+      if (r && r.ok === false) {
+        setTraeBusy(false);
+        appendTraeLog('未能启动：' + (r.error || '未知错误'), 'err');
+      }
+    })
+    .catch((e) => {
+      setTraeBusy(false);
+      appendTraeLog(label + '调用失败：' + e, 'err');
+    });
+}
+
+function traeRefreshAccounts() {
+  if (!(TRAE_DATA && (TRAE_DATA.accounts || []).length)) {
+    appendTraeLog('还没有 Trae 账号，请先导入本机登录态或添加账号', 'warn');
+    return;
+  }
+  startTraeTask('refresh', null);
+}
+
+function traeImport() {
+  startTraeTask('import', null);
+}
+
+function traeSyncUsage() {
+  if (!(TRAE_DATA && (TRAE_DATA.accounts || []).length)) {
+    appendTraeLog('还没有 Trae 账号，无法同步用量', 'warn');
+    return;
+  }
+  const select = $('traeUsageDays');
+  const days = select ? Number(select.value) : 7;
+  const active = traeActive(TRAE_DATA);
+  if (!active) return;
+  startTraeTask('usage', active.id, Number.isFinite(days) ? days : null);
+}
+
+function resetTraeAccountPending() {
+  if (!TRAE_ACCOUNT_PENDING) return;
+  TRAE_ACCOUNT_PENDING = null;
+  if (TRAE_DATA) renderTraeAccounts(TRAE_DATA);
+}
+
+function traeAccountAction(action, id) {
+  if (TRAE_BUSY) return;
+  const account = traeAccountById(id);
+  if (!account) return;
+
+  if (action === 'edit') {
+    openTraeAccountDialog(account);
+    return;
+  }
+  if (action === 'refresh') {
+    startTraeTask('refresh', id);
+    return;
+  }
+  if (action === 'checkin' || action === 'remove'
+      || action === 'renew_device') {
+    if (!TRAE_ACCOUNT_PENDING
+        || TRAE_ACCOUNT_PENDING.action !== action
+        || TRAE_ACCOUNT_PENDING.id !== id) {
+      TRAE_ACCOUNT_PENDING = { action, id };
+      renderTraeAccounts(TRAE_DATA);
+      appendTraeLog('待确认：再次点击「'
+        + (action === 'remove' ? '确认删除'
+          : action === 'renew_device' ? '确认换设备' : '确认签到')
+        + '」会修改本地 Trae 账号或服务端签到状态', 'warn');
+      setTimeout(resetTraeAccountPending, 8000);
+      return;
+    }
+    TRAE_ACCOUNT_PENDING = null;
+  }
+  if (action === 'checkin') {
+    startTraeTask('checkin', id);
+    return;
+  }
+
+  let actionName = action;
+  let payload = null;
+  if (action === 'toggle') {
+    actionName = 'update';
+    payload = { enabled: !account.enabled };
+  }
+  if (action === 'activate') actionName = 'activate';
+
+  setTraeBusy(true, '正在保存账号设置…');
+  call('trae_account_action', actionName, id, payload)
+    .then((r) => {
+      if (r && r.ok) {
+        appendTraeLog('账号「' + (account.display || '') + '」：'
+          + (r.report || '操作完成'), 'ok');
+      } else {
+        appendTraeLog('账号操作失败：' + ((r && (r.error || r.report)) || '未知错误'), 'err');
+      }
+    })
+    .catch((e) => appendTraeLog('账号操作调用失败：' + e, 'err'))
+    .finally(() => {
+      setTraeBusy(false);
+      refreshTrae(true);
+    });
+}
+
+function onTraeDone(data) {
+  setTraeBusy(false);
+  traeResetCheckin();
+  const kind = data && data.kind ? data.kind : '';
+  const payload = data && data.payload ? data.payload : null;
+
+  if (payload && kind === 'usage' && Array.isArray(payload.expiring)) {
+    TRAE_EXPIRING = payload.expiring;
+    TRAE_EXPIRING_ACCOUNT = payload.account && payload.account.id
+      ? payload.account.id : null;
+  }
+
+  if (payload) {
+    const result = payload.result || payload.report || '完成';
+    const text = (TRAE_RESULT_LABEL[result] || result) + '：'
+      + (payload.report || payload.message || '');
+    appendTraeLog(text, data.exit === 0 ? 'ok' : 'warn');
+    if (kind === 'import' && (payload.added !== undefined || payload.updated !== undefined)) {
+      appendTraeLog('本机导入：新增 ' + (payload.added || 0)
+        + ' 个，更新 ' + (payload.updated || 0) + ' 个', 'meta');
+    }
+    (payload.accounts || []).forEach((row) => {
+      if (!row || typeof row !== 'object') return;
+      const mark = row.ok ? '✔' : '✖';
+      const gained = row.gained ? ' +' + row.gained : '';
+      const remaining = row.remaining !== undefined && row.remaining !== null
+        ? '（剩余 ' + row.remaining + '）' : '';
+      appendTraeLog('  ' + mark + ' ' + (row.name || '账号') + gained
+        + remaining + ' ' + (row.message || ''), row.ok ? 'ok' : 'warn');
+    });
+  } else if (data && data.error) {
+    appendTraeLog('Trae 操作异常：' + data.error, 'err');
+  }
+
+  if (data && data.log) renderTraeLog(data.log);
+  refreshTrae(true);
+  refreshTraeService(true).finally(scheduleTraeServicePoll);
+}
+
+function renderTraeService(s) {
+  TRAE_SERVICE = s || {};
+  const supported = TRAE_SERVICE.supported !== false;
+  const ok = TRAE_SERVICE.ok !== false;
+  const tasks = TRAE_SERVICE.tasks || [];
+  const task = tasks[0] || {};
+
+  const pill = $('tsvcState');
+  let pillText = '未检测';
+  let pillKind = '';
+  if (!supported) {
+    pillText = '仅 Windows';
+    pillKind = 'warn';
+  } else if (!ok) {
+    pillText = '读取失败';
+    pillKind = 'err';
+  } else if (TRAE_SERVICE.running) {
+    pillText = '运行中';
+    pillKind = 'busy';
+  } else if (TRAE_SERVICE.installed && TRAE_SERVICE.enabled) {
+    pillText = '已启用';
+    pillKind = 'ok';
+  } else if (TRAE_SERVICE.installed) {
+    pillText = '已停用';
+    pillKind = 'warn';
+  } else {
+    pillText = '未安装';
+  }
+  pill.textContent = pillText;
+  pill.className = 'svc-pill ' + pillKind;
+
+  const summary = $('tsvcSummary');
+  const autoTime = (TRAE_DATA && TRAE_DATA.settings && TRAE_DATA.settings.auto_time) || '08:05';
+  if (!supported) {
+    summary.textContent = 'Trae 计划任务使用 Windows 任务计划程序，当前平台不支持。';
+  } else if (!ok) {
+    summary.textContent = '状态读取失败：' + (TRAE_SERVICE.error || '未知错误');
+  } else if (!TRAE_SERVICE.installed) {
+    summary.textContent = '尚未安装 TraeDailyCheckin。点击「安装 / 修复」创建独立任务，'
+      + '默认从 ' + autoTime + ' 起每天运行 5 次；不会改动 WorkBuddy / Qoder 的任务。';
+  } else if (TRAE_SERVICE.enabled) {
+    summary.textContent = 'TraeDailyCheckin 已启用'
+      + (TRAE_SERVICE.next_run ? '，下次运行 ' + TRAE_SERVICE.next_run : '')
+      + '。';
+  } else {
+    summary.textContent = 'TraeDailyCheckin 已安装但被停用；点击「启用」恢复自动签到。';
+  }
+
+  const box = $('tsvcTasks');
+  box.innerHTML = '';
+  tasks.forEach((t) => box.appendChild(makeServiceNode(t)));
+
+  const log = $('tsvcLog');
+  if (TRAE_SERVICE.log && TRAE_SERVICE.log.line) {
+    log.textContent = '最近日志 ' + (TRAE_SERVICE.log.at || '') + ' · '
+      + TRAE_SERVICE.log.line;
+    log.title = (TRAE_SERVICE.log.path || '') + '\n' + TRAE_SERVICE.log.line;
+  } else {
+    log.textContent = '';
+    log.title = '';
+  }
+
+  let taskText = '—';
+  let taskHint = '未检测';
+  if (!supported) {
+    taskText = '仅 Windows';
+    taskHint = '计划任务管理不可用';
+  } else if (!ok) {
+    taskText = '读取失败';
+    taskHint = TRAE_SERVICE.error || '';
+  } else if (!task.installed) {
+    taskText = '未安装';
+    taskHint = '点击「安装 / 修复」创建 TraeDailyCheckin';
+  } else if (task.state === 'Running') {
+    taskText = '运行中';
+    taskHint = '上次 ' + (task.last_run || '尚未运行');
+  } else if (task.enabled) {
+    taskText = '已启用';
+    taskHint = task.next_run ? '下次 ' + task.next_run : '等待调度';
+  } else {
+    taskText = '已停用';
+    taskHint = '点击「启用」恢复自动签到';
+  }
+  setCard('tTask', 'tTaskHint', taskText, taskHint);
+  if (TRAE_DATA) traeSideState();
+
+  const installed = !!TRAE_SERVICE.installed_count;
+  const anyEnabled = tasks.some((t) => t.installed && t.enabled);
+  const canUse = supported && ok && !TRAE_SVC_BUSY;
+
+  $('btnTSvcInstall').disabled = !canUse;
+  $('btnTSvcEnable').disabled = !canUse || !installed || !!TRAE_SERVICE.enabled;
+  $('btnTSvcDisable').disabled = !canUse || !installed || !anyEnabled;
+  $('btnTSvcRun').disabled = !canUse || !installed || !anyEnabled;
+  $('btnTSvcStop').disabled = !canUse || !TRAE_SERVICE.running;
+  $('btnTSvcUninstall').disabled = !canUse || !installed;
+  $('btnTSvcRefresh').disabled = TRAE_SVC_BUSY;
+}
+
+function setTraeServiceBusy(on) {
+  TRAE_SVC_BUSY = on;
+  const pill = $('tsvcState');
+  if (on) {
+    pill.textContent = '处理中…';
+    pill.className = 'svc-pill busy';
+  }
+  Object.keys(TRAE_SVC_BUTTONS).forEach((key) => {
+    if (on) $(TRAE_SVC_BUTTONS[key]).disabled = true;
+  });
+  $('btnTSvcRefresh').disabled = on;
+  if (!on) renderTraeService(TRAE_SERVICE || {});
+}
+
+function resetTraeSvcPending() {
+  if (!TRAE_SVC_PENDING) return;
+  const btn = $(TRAE_SVC_BUTTONS[TRAE_SVC_PENDING]);
+  if (btn) {
+    btn.classList.remove('confirm');
+    if (btn.dataset.label) {
+      btn.textContent = btn.dataset.label;
+      delete btn.dataset.label;
+    }
+  }
+  TRAE_SVC_PENDING = null;
+}
+
+function traeServiceAction(action) {
+  if (TRAE_SVC_BUSY) return;
+  const btn = $(TRAE_SVC_BUTTONS[action]);
+  const label = TRAE_SVC_ACTION_LABEL[action] || action;
+
+  if (TRAE_SVC_CONFIRM[action] && TRAE_SVC_PENDING !== action) {
+    resetTraeSvcPending();
+    TRAE_SVC_PENDING = action;
+    btn.dataset.label = btn.textContent;
+    btn.classList.add('confirm');
+    btn.textContent = '确认' + label + '？';
+    appendTraeLog('待确认：' + label + ' Trae 计划任务（再次点击按钮执行）', 'warn');
+    setTimeout(() => { if (TRAE_SVC_PENDING) resetTraeSvcPending(); }, 8000);
+    return;
+  }
+
+  resetTraeSvcPending();
+  setTraeServiceBusy(true);
+  appendTraeLog('Trae 计划任务：' + label + '…', 'cmd');
+  call('trae_service_action', action)
+    .then((r) => {
+      if (r && r.ok) {
+        appendTraeLog('Trae 计划任务：' + (r.message || (label + '完成')), 'ok');
+      } else {
+        appendTraeLog('Trae 计划任务：'
+          + ((r && (r.error || r.message)) || '操作失败'), 'err');
+      }
+      if (r && r.status) renderTraeService(r.status);
+      else return refreshTraeService(true);
+    })
+    .catch((e) => appendTraeLog('Trae 计划任务调用失败：' + e, 'err'))
+    .finally(() => {
+      TRAE_SVC_BUSY = false;
+      refreshTraeService(true).finally(() => setTraeServiceBusy(false));
+    });
+}
+
+function refreshTraeService(silent) {
+  if (TRAE_SVC_BUSY || TRAE_SVC_REFRESHING) return Promise.resolve();
+  TRAE_SVC_REFRESHING = true;
+  const seq = ++TRAE_SVC_SEQ;
+  const btn = $('btnTSvcRefresh');
+  if (btn) btn.disabled = true;
+  return call('trae_service_status')
+    .then((s) => {
+      if (seq !== TRAE_SVC_SEQ) return;
+      renderTraeService(s);
+      if (!silent && s && s.ok === false) {
+        appendTraeLog('读取 Trae 计划任务失败：' + (s.error || '未知错误'), 'err');
+      }
+    })
+    .catch((e) => {
+      if (seq !== TRAE_SVC_SEQ) return;
+      renderTraeService({ supported: true, ok: false, error: String(e), tasks: [] });
+      appendTraeLog('读取 Trae 计划任务异常：' + e, 'err');
+    })
+    .finally(() => {
+      TRAE_SVC_REFRESHING = false;
+      if (seq === TRAE_SVC_SEQ) {
+        const refresh = $('btnTSvcRefresh');
+        if (refresh) refresh.disabled = TRAE_SVC_BUSY;
+      }
+    });
+}
+
+function scheduleTraeServicePoll() {
+  if (TRAE_SVC_TIMER) clearTimeout(TRAE_SVC_TIMER);
+  const delay = (TRAE_SERVICE && TRAE_SERVICE.running) ? 20000 : 180000;
+  TRAE_SVC_TIMER = setTimeout(() => {
+    if (document.hidden || CURRENT_PAGE !== 'trae') {
+      scheduleTraeServicePoll();
+      return;
+    }
+    refreshTraeService(true).finally(scheduleTraeServicePoll);
+  }, delay);
+}
+
+function openTraeAccountDialog(account) {
+  TRAE_EDIT_ID = account ? account.id : null;
+  const dialog = $('traeAccountDialog');
+  if (!dialog) return;
+  $('traeAccountTitle').textContent = account ? '编辑 Trae 账号' : '添加 Trae 账号';
+  $('traeAccountHint').textContent = account
+    ? '修改备注名、会员标记或启用状态。登录凭证不在此处回显。'
+    : '支持 Cloud-IDE-JWT Token，或 X-Cloudide-Session 会话 Cookie；'
+      + '两者同时粘贴时优先使用 Token。';
+  $('traeCredentialField').hidden = !!account;
+  $('traeCredential').value = '';
+  $('traeAccountName').value = account ? (account.name || '') : '';
+  $('traeAccountMember').checked = account ? !!account.is_member : false;
+  $('traeAccountEnabled').checked = account ? !!account.enabled : true;
+  $('traeAccountError').textContent = '';
+  $('btnTraeAccountSave').disabled = false;
+  dialog.showModal();
+  setTimeout(() => {
+    if (account) $('traeAccountName').focus();
+    else $('traeCredential').focus();
+  }, 30);
+}
+
+function closeTraeAccountDialog() {
+  const dialog = $('traeAccountDialog');
+  if (dialog && dialog.open) dialog.close();
+  TRAE_EDIT_ID = null;
+}
+
+function setTraeFormBusy(formId, saveId, on, label) {
+  const form = $(formId);
+  const save = $(saveId);
+  if (form) {
+    form.querySelectorAll('input, textarea, button').forEach((el) => {
+      if (el !== save) el.disabled = on;
+    });
+  }
+  if (save) {
+    save.disabled = on;
+    if (on) {
+      save.dataset.label = save.textContent;
+      save.textContent = label || '保存中…';
+    } else if (save.dataset.label) {
+      save.textContent = save.dataset.label;
+      delete save.dataset.label;
+    }
+  }
+}
+
+async function submitTraeAccount(event) {
+  event.preventDefault();
+  const error = $('traeAccountError');
+  error.textContent = '';
+  const name = $('traeAccountName').value.trim();
+  const member = $('traeAccountMember').checked;
+  const enabled = $('traeAccountEnabled').checked;
+
+  if (TRAE_EDIT_ID) {
+    setTraeFormBusy('traeAccountForm', 'btnTraeAccountSave', true);
+    try {
+      const r = await call('trae_account_action', 'update', TRAE_EDIT_ID,
+        { name, enabled, is_member: member });
+      if (!r || !r.ok) {
+        error.textContent = (r && (r.error || r.report)) || '保存失败';
+        return;
+      }
+      appendTraeLog('账号「' + (name || '未命名') + '」设置已保存', 'ok');
+      closeTraeAccountDialog();
+      refreshTrae(true);
+    } catch (e) {
+      error.textContent = '调用失败：' + e;
+    } finally {
+      setTraeFormBusy('traeAccountForm', 'btnTraeAccountSave', false);
+    }
+    return;
+  }
+
+  const credential = $('traeCredential').value.trim();
+  if (!credential) {
+    error.textContent = '请粘贴 Cloud-IDE-JWT Token 或 X-Cloudide-Session 会话 Cookie';
+    $('traeCredential').focus();
+    return;
+  }
+
+  setTraeFormBusy('traeAccountForm', 'btnTraeAccountSave', true, '验证中…');
+  try {
+    let r = await call('trae_account_action', 'add', null,
+      { credential, name });
+    if (!r || !r.ok) {
+      error.textContent = (r && (r.error || r.report)) || '添加失败';
+      return;
+    }
+    const account = r.account || {};
+    if (account.id && (!!account.is_member !== member || !!account.enabled !== enabled)) {
+      const update = await call('trae_account_action', 'update', account.id,
+        { name, enabled, is_member: member });
+      if (!update || !update.ok) {
+        error.textContent = (update && (update.error || update.report))
+          || '账号已添加，但保存会员 / 启用状态失败';
+        return;
+      }
+    }
+    appendTraeLog('账号「' + (name || account.display || '新账号') + '」已添加', 'ok');
+    closeTraeAccountDialog();
+    refreshTrae(true);
+  } catch (e) {
+    error.textContent = '调用失败：' + e;
+  } finally {
+    setTraeFormBusy('traeAccountForm', 'btnTraeAccountSave', false);
+  }
+}
+
+function openTraeSettings() {
+  const dialog = $('traeSettingsDialog');
+  if (!dialog) return;
+  const settings = (TRAE_DATA && TRAE_DATA.settings) || {};
+  $('traeAutoTime').value = settings.auto_time || '08:05';
+  $('traeInterval').value = settings.interval_seconds == null
+    ? 5 : settings.interval_seconds;
+  $('traeUsageDefaultDays').value = settings.usage_days || 7;
+  $('traeFeishu').value = '';
+  $('traeFeishuState').textContent = settings.feishu_configured
+    ? '已配置飞书 Webhook（不会回显）。留空保持不变。'
+    : '尚未配置飞书推送；填写后，签到结果会推送到群机器人。';
+  $('traeSettingsError').textContent = '';
+  $('btnTraeSettingsSave').disabled = false;
+  dialog.showModal();
+  setTimeout(() => $('traeAutoTime').focus(), 30);
+}
+
+function closeTraeSettings() {
+  const dialog = $('traeSettingsDialog');
+  if (dialog && dialog.open) dialog.close();
+}
+
+async function submitTraeSettings(event) {
+  event.preventDefault();
+  const error = $('traeSettingsError');
+  error.textContent = '';
+  const autoTime = $('traeAutoTime').value;
+  if (!autoTime) {
+    error.textContent = '请选择自动签到时间';
+    return;
+  }
+  const payload = {
+    auto_time: autoTime,
+    interval_seconds: Number($('traeInterval').value),
+    usage_days: Number($('traeUsageDefaultDays').value),
+  };
+  const feishu = $('traeFeishu').value.trim();
+  if (feishu) payload.feishu_webhook = feishu;
+
+  setTraeFormBusy('traeSettingsForm', 'btnTraeSettingsSave', true);
+  try {
+    const r = await call('trae_update_settings', payload);
+    if (!r || !r.ok) {
+      error.textContent = (r && (r.error || r.report)) || '保存失败';
+      return;
+    }
+    if (TRAE_DATA && r.settings) TRAE_DATA.settings = r.settings;
+    appendTraeLog('Trae 设置已保存'
+      + (payload.feishu_webhook ? '，飞书 Webhook 已更新' : ''), 'ok');
+    closeTraeSettings();
+    refreshTrae(true);
+  } catch (e) {
+    error.textContent = '调用失败：' + e;
+  } finally {
+    setTraeFormBusy('traeSettingsForm', 'btnTraeSettingsSave', false);
+  }
+}
+
+async function clearTraeFeishu() {
+  const state = $('traeFeishuState');
+  const error = $('traeSettingsError');
+  error.textContent = '';
+  setTraeFormBusy('traeSettingsForm', 'btnTraeSettingsSave', true, '清除中…');
+  try {
+    const r = await call('trae_update_settings', { feishu_webhook: '' });
+    if (!r || !r.ok) {
+      error.textContent = (r && (r.error || r.report)) || '清除失败';
+      return;
+    }
+    if (TRAE_DATA && r.settings) TRAE_DATA.settings = r.settings;
+    if (state) state.textContent = '已清除飞书 Webhook。';
+    appendTraeLog('飞书 Webhook 已清除', 'ok');
+  } catch (e) {
+    error.textContent = '调用失败：' + e;
+  } finally {
+    setTraeFormBusy('traeSettingsForm', 'btnTraeSettingsSave', false);
+  }
+}
+
 /* ---------- 存活心跳 ---------- */
 
 // 每 5 秒一次，等上一次 Promise 落地后才排下一次。UI 线程或 WebView2
@@ -1947,6 +3864,73 @@ function startHeartbeat(api) {
 }
 
 window.addEventListener('beforeunload', () => { BEAT_STOPPED = true; });
+
+/* ---------- 分区懒加载 ---------- */
+
+/* 启动时只渲染 bootstrap 带回来的缓存数据；网络查询与 PowerShell 调用
+ * 都推迟到对应区块进入视口时。原因：这些动作全发生在首帧之后，缩短不了
+ * WebView2 初始化那段固定等待，但它们在窗口很小、或停在 Qoder 页时
+ * 完全是白干的——尤其脚本服务每次刷新都要起一次 PowerShell。
+ *
+ * 按数据源分组而不是按卡片一张一张拉：顶部四张卡共用同一次 status/doctor
+ * 查询，拆开只会增加往返和后端锁竞争，并不会更快。
+ */
+const LAZY_SECTIONS = [];
+let LAZY_OBSERVER = null;
+let LAZY_RESIZE_BOUND = false;
+
+function lazyKick() {
+  if (!LAZY_SECTIONS.length) return;
+  // 预取边距：滚动到附近就提前加载，避免用户看到空面板
+  const margin = 240;
+  const viewport = window.innerHeight || 800;
+  LAZY_SECTIONS.forEach((section) => {
+    if (section.done) return;
+    const el = section.el;
+    // 找不到元素时按可见处理（fail-open），避免改版后区块永远不加载
+    let visible = true;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      // 区块所在页面被切走（hidden）时 rect 全为 0，等切回来再判定
+      const hasBox = rect.width > 0 || rect.height > 0;
+      visible = hasBox && rect.top < viewport + margin && rect.bottom > -margin;
+    }
+    if (!visible) return;
+    section.done = true;
+    if (LAZY_OBSERVER && el) LAZY_OBSERVER.unobserve(el);
+    try {
+      section.run();
+    } catch (e) {
+      appendLog('懒加载区块失败（' + section.key + '）：' + e, 'err');
+      try { window.__errs.push('懒加载失败：' + section.key + '：' + e); } catch (err) {}
+    }
+  });
+}
+
+function whenVisible(key, el, run) {
+  const section = { key, el, run, done: false };
+  LAZY_SECTIONS.push(section);
+
+  if (el && typeof IntersectionObserver === 'function') {
+    if (!LAZY_OBSERVER) {
+      LAZY_OBSERVER = new IntersectionObserver(() => lazyKick(),
+        { rootMargin: '240px 0px' });
+    }
+    LAZY_OBSERVER.observe(el);
+  }
+  if (!LAZY_RESIZE_BOUND && typeof window.addEventListener === 'function') {
+    // 窗口从很小拉到很大、或从 Qoder 页切回来时，观察器之外的兜底判定
+    window.addEventListener('resize', lazyKick);
+    // 窗口被显示出来（visibilityState 变化）时再判一次：隐藏期间
+    // IntersectionObserver 可能不派发回调，rect 判定不受影响但这里保险
+    if (typeof document.addEventListener === 'function') {
+      document.addEventListener('visibilitychange', lazyKick);
+    }
+    LAZY_RESIZE_BOUND = true;
+  }
+  setTimeout(lazyKick, 0);            // 首帧后再判一次，可见区块立即开跑
+  return section;
+}
 
 /* ---------- 启动 ---------- */
 
@@ -1968,6 +3952,9 @@ async function boot(api) {
   sp.classList.toggle('bad', !info.signin_exists);
   sp.title = info.signin;
   if (!info.signin_exists) {
+    const hint = $('wbSideHint');
+    if (hint) hint.textContent = '缺少 signin.py';
+    wbSetDot('err');
     appendLog('未找到 signin.py。', 'err');
     appendLog('程序按以下顺序找过（都不存在）：', 'meta');
     (info.signin_searched || []).forEach((p) => appendLog('  ' + p, 'meta'));
@@ -2003,8 +3990,30 @@ async function boot(api) {
   // 脚本服务状态独立刷新：计划任务可能被系统或其他工具改动。
   // 空闲时 3 分钟一次，任务运行中 20 秒一次；操作后也会立即刷新。
   // 频次不必太高：每次刷新都要起一次 PowerShell，纯属浪费。
-  refreshService(true);
-  scheduleServicePoll();
+  // 首次查询同样等区块可见再发起，见下方 whenVisible。
+
+  // 各区块进入视口（或所在页面被切到前台）才发起自己的查询：
+  //   指标卡     -> status + doctor（同一次数据源，含签到详情与本月日历）
+  //   成长中心   -> growth
+  //   脚本服务   -> 计划任务状态（每次都要起 PowerShell，最贵的一项）
+  whenVisible('cards', $('cards'), () => {
+    if (!info.signin_exists) return;
+    CHECKIN_STARTED = true;
+    runSeries(['status', 'doctor'], () => {
+      CHECKIN_DONE = true;
+      maybeLoadGrowth();
+    });
+  });
+  // 这两个区块只有 class 没有 id（$ 只查 id），必须用 querySelector。
+  whenVisible('growth', document.querySelector('.pane-tasks'), () => {
+    if (!info.signin_exists) return;
+    GROWTH_WANTED = true;
+    maybeLoadGrowth();
+  });
+  whenVisible('service', document.querySelector('.pane-service'), () => {
+    refreshService(true);
+    scheduleServicePoll();
+  });
 
   setPage(savedPage());
   if (!info.qoder_exists) {
@@ -2013,14 +4022,18 @@ async function boot(api) {
     qoderSetDot('err');
     appendLog('未找到 qoder_signin.py，Qoder 监控页不可用。', 'warn');
   }
+  if (!info.trae_exists) {
+    const hint = $('traeSideHint');
+    if (hint) hint.textContent = '缺少 trae_signin.py';
+    traeSetDot('err');
+    setTraeAvailability(false);
+    appendLog('未找到 trae_signin.py，Trae 监控页不可用。'
+      + '请把脚本放到 exe 同目录。', 'warn');
+  }
 
-  // 启动即刷新：缓存只是"先有个数看"，真实数据以这次查询为准。
-  // doctor 只跑后端、不暴露按钮，用来填充「凭据格式」那张卡。
-  if (info.signin_exists) {
-    // status/doctor 占用 signin 锁；等它们跑完再拉成长中心，避免启动时
-    // 非阻塞加锁失败，在日志里留下一条无意义的“有命令正在执行”。
-    runSeries(['status', 'doctor'], () => loadGrowth(true));
-  } else {
+  // 缓存只是"先有个数看"，真实数据以各区块自己的查询为准（见上）。
+  // 只有 Qoder 页不在启动时联网：切到该页或点刷新才查询。
+  if (!info.signin_exists) {
     setBadge('缺少 signin.py', 'err');
   }
 
@@ -2059,6 +4072,7 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btnGrowthRefresh').addEventListener('click', () => loadGrowth(false));
   $('btnStatusRefresh').addEventListener('click', refreshStatus);
   $('btnCalRefresh').addEventListener('click', refreshStatus);
+  $('btnWbAccountRefresh').addEventListener('click', refreshWorkbuddyAccount);
 
   $('btnSvcRefresh').addEventListener('click', () => refreshService(false));
   Object.keys(SVC_BUTTONS).forEach((action) => {
@@ -2070,6 +4084,7 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   $('btnQoderRefresh').addEventListener('click', () => refreshQoder(false));
+  $('btnQoderAccountRefresh').addEventListener('click', () => refreshQoder(false));
   $('btnQoderClaim').addEventListener('click', qoderClaim);
   $('btnQoderLogClear').addEventListener('click', () => {
     $('qoderLog').innerHTML = '';
@@ -2078,6 +4093,44 @@ document.addEventListener('DOMContentLoaded', function () {
   $('btnQSvcRefresh').addEventListener('click', () => refreshQoderService(false));
   Object.keys(QODER_SVC_BUTTONS).forEach((action) => {
     $(QODER_SVC_BUTTONS[action]).addEventListener('click', () => qoderServiceAction(action));
+  });
+
+  $('btnTraeRefresh').addEventListener('click', () => refreshTrae(false));
+  $('btnTraeCheckin').addEventListener('click', traeCheckin);
+  $('btnTraeImport').addEventListener('click', traeImport);
+  $('btnTraeAdd').addEventListener('click', () => openTraeAccountDialog(null));
+  $('btnTraeSettings').addEventListener('click', openTraeSettings);
+  $('btnTraeAccountsRefresh').addEventListener('click', traeRefreshAccounts);
+  $('btnTraeUsage').addEventListener('click', traeSyncUsage);
+  $('btnTraeLogClear').addEventListener('click', () => {
+    $('traeLog').innerHTML = '';
+    $('traeLogAt').textContent = '显示已清空';
+  });
+  $('traeUsageDays').addEventListener('change', () => {
+    TRAE_USAGE_DAYS_SET = true;
+  });
+  $('traeAccounts').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-trae-action]');
+    if (!btn || btn.disabled) return;
+    traeAccountAction(btn.dataset.traeAction, btn.dataset.traeId);
+  });
+  $('btnTSvcRefresh').addEventListener('click', () => refreshTraeService(false));
+  Object.keys(TRAE_SVC_BUTTONS).forEach((action) => {
+    $(TRAE_SVC_BUTTONS[action]).addEventListener('click', () => traeServiceAction(action));
+  });
+
+  $('traeAccountForm').addEventListener('submit', submitTraeAccount);
+  $('btnTraeAccountClose').addEventListener('click', closeTraeAccountDialog);
+  $('btnTraeAccountCancel').addEventListener('click', closeTraeAccountDialog);
+  $('traeAccountDialog').addEventListener('click', (e) => {
+    if (e.target === $('traeAccountDialog')) closeTraeAccountDialog();
+  });
+  $('traeSettingsForm').addEventListener('submit', submitTraeSettings);
+  $('btnTraeSettingsClose').addEventListener('click', closeTraeSettings);
+  $('btnTraeSettingsCancel').addEventListener('click', closeTraeSettings);
+  $('btnTraeFeishuClear').addEventListener('click', clearTraeFeishu);
+  $('traeSettingsDialog').addEventListener('click', (e) => {
+    if (e.target === $('traeSettingsDialog')) closeTraeSettings();
   });
 
   $('taskTabs').addEventListener('click', (e) => {

@@ -596,6 +596,43 @@ def _short(value, limit=200):
     return text[:limit] + ("…" if len(text) > limit else "")
 
 
+def _safe_text(value, limit=512):
+    if not isinstance(value, (str, int)):
+        return ""
+    return str(value).strip()[:limit]
+
+
+def _mask_email(value):
+    text = _safe_text(value, 320)
+    if "@" not in text:
+        return ""
+    name, domain = text.split("@", 1)
+    if not name or not domain:
+        return ""
+    prefix = name[:1] + "***" if len(name) <= 2 else name[:2] + "***"
+    return prefix + "@" + domain
+
+
+def _mask_phone(value):
+    text = _safe_text(value, 64)
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if len(digits) >= 7:
+        return digits[:3] + "****" + digits[-4:]
+    return "***" if digits else ""
+
+
+def _public_user(user):
+    if not isinstance(user, dict):
+        return {}
+    return {
+        "id": _safe_text(user.get("id"), 80),
+        "name": _safe_text(user.get("name"), 120),
+        "email_masked": _mask_email(user.get("email")),
+        "phone_masked": _mask_phone(user.get("phone")),
+        "avatar_url": _safe_text(user.get("avatarUrl"), 2048),
+    }
+
+
 def _result(name, report, **extra):
     out = {"result": name, "report": report, "needs_attention": name in FAILURE_RESULTS}
     out.update(extra)
@@ -761,7 +798,8 @@ def _auth_failure(exc, action):
 def run_doctor():
     token = (os.environ.get("QODER_TOKEN") or "").strip()
     out = {"result": "OK", "version": VERSION, "platform": sys.platform,
-           "token_source": "env" if token else "desktop", "needs_attention": False}
+           "token_source": "env" if token else "desktop", "needs_attention": False,
+           "region": "CN", "region_label": "国内", "region_kind": "cn"}
     if token:
         _sensitive_values.add(token)
         out["report"] = "使用环境变量 QODER_TOKEN（无法离线校验有效期）"
@@ -783,6 +821,7 @@ def run_doctor():
         "auth_dir": sess.get("_auth_dir"),
         "token_expires_at": sess.get("expiresAt"),
         "decrypted": True,
+        "account": _public_user(sess.get("user")),
     })
     exe = next((p for p in _umid_candidates() if p.is_file()), None)
     out["device_component"] = str(exe) if exe else None

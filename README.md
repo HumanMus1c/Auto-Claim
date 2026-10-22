@@ -1,8 +1,8 @@
 <div align="center">
 
-# Auto-claim
+# Auto-Claim
 
-**WorkBuddy 自动签到 · 成长中心 · Qoder CN 每日 100 Credits**
+**WorkBuddy 自动签到 · 成长中心 · Qoder CN 每日 100 Credits · Trae 多账号签到**
 
 自带 Windows 本地图形控制台 —— 看状态、跑命令、装计划任务，不用再开终端。
 
@@ -15,16 +15,18 @@
 </div>
 
 <p align="center">
-  <a href="assets/dashboard.png"><img src="assets/dashboard.png" alt="Auto-claim 控制台（窗口最大化）" width="100%"></a>
+  <a href="assets/dashboard.png"><img src="assets/dashboard.png" alt="Auto-Claim 控制台（窗口最大化）" width="100%"></a>
 </p>
 
 <p align="center">
-  <sub>控制台主界面（窗口最大化）：签到指标卡、脚本服务、成长中心、Qoder CN 入口与主题切换。点击图片查看原图；截图不含令牌或账号路径。</sub>
+  <sub>控制台主界面（窗口最大化）：签到指标卡、计划任务、成长中心、Qoder CN 入口与主题切换。点击图片查看原图；截图不含令牌或账号路径。</sub>
 </p>
 
 > 本项目是 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) 的衍生项目。
 >
-> 上游提供了 `signin.py`、`qoder_signin.py`、凭据解密、签到 / 成长中心逻辑和系统级定时安装脚本；本项目在其之上新增了 **Windows 桌面控制台 `dashboard/`**，把常用操作、成长中心数据、计划任务和 Qoder CN 监控收进一个本地窗口。
+> 上游提供了 `signin.py`、`qoder_signin.py`、凭据解密、签到 / 成长中心逻辑和系统级定时安装脚本；本项目在其之上新增了 **Windows 桌面控制台 `dashboard/`**，把常用操作、成长中心数据、计划任务和 Qoder CN / Trae 监控收进一个本地窗口。
+>
+> Trae 后端移植自 [star620/TraeTools](https://github.com/star620/TraeTools)（MIT），并改写为只依赖 Python 标准库的 `trae_signin.py`；本机登录态导入、签到、用量、历史与通知口径与该工具保持一致。
 >
 > 签到核心逻辑保持上游实现；控制台复用其认证与请求函数，不另写签到 / 领取逻辑，也不修改接口协议。
 
@@ -32,11 +34,12 @@
 
 ## 🎯 项目定位
 
-| 能力 | 上游脚本 | Auto-claim |
+| 能力 | 上游脚本 | Auto-Claim |
 |---|---|---|
 | WorkBuddy 每日签到 | ✅ | ✅ 复用上游逻辑 |
 | 成长中心全套操作 | ✅ | ✅ 复用，并提供可视化面板 |
 | Qoder CN 每日 100 Credits | ✅ | ✅ 复用，并提供独立监控页 |
+| Trae 多账号签到 / 用量 | TraeTools | ✅ 移植后端，并提供独立监控页 |
 | Windows 图形控制台 | — | ✅ 单文件 exe，无终端窗口 |
 | 计划任务图形管理 | 安装脚本 | ✅ 安装 / 启停 / 立即运行 / 停止 / 卸载 |
 | 成长中心数据浏览 | JSON / 日志 | ✅ 概览卡 + 任务分页 + 进度 |
@@ -46,10 +49,11 @@
 
 控制台不新增对服务端的私有接口：
 
-- **写操作**只通过两个脚本已有的命令入口执行：WorkBuddy 的 `status` / `auto` / `growth` / `claim` / `all`，Qoder CN 的 `doctor` / `status` / `auto`。
+- **写操作**只通过脚本已有的命令入口执行：WorkBuddy 的 `status` / `auto` / `growth` / `claim` / `all`，Qoder CN 的 `doctor` / `status` / `auto`，Trae 的 `status` / `auto` / `usage` / `import-local`。
 - **成长中心面板**复用 `signin.py` 的认证链路，直接读取上游同一组 GET 接口用于展示；不另写 crypto，也不改接口协议。
+- **Trae 面板**复用 `trae_signin.py` 的账号存储与接口封装；控制台只负责展示、触发和计划任务桥接，不重复实现签到协议。
 
-`silent*` 系列只写日志文件、stdout 为空，对界面没有意义，因此不出现在按钮里；`doctor` 不设按钮，由指标卡区块加载时自动执行一次，用来填充「凭据格式」卡片。
+`silent*` 系列只写日志文件、stdout 为空，对界面没有意义，因此不出现在按钮里；`doctor` 不设独立按钮，启动时自动执行一次，用来填充「凭据格式」卡片和 WorkBuddy 账号卡片，卡片内可单独刷新或签到。
 
 ---
 
@@ -57,7 +61,7 @@
 
 ### 🖥️ 单文件桌面控制台
 
-- 产物为仓库根目录的 `Auto-claim-dashboard.exe`，PyInstaller 单文件打包，约 16 MB，双击即用，不弹终端窗口。
+- 产物为仓库根目录的 `Auto-Claim-dashboard.exe`，PyInstaller 单文件打包，约 16 MB，双击即用，不弹终端窗口。
 - 基于 **pywebview + 系统 WebView2**，界面用本地 HTML/CSS/JS 渲染，不需要前端构建步骤，也不需要 Node 运行时。
 - 打包后不依赖系统 Python：WorkBuddy 的查询与领取在控制台进程内直接调用 `signin.py`，不会出现「跑 status 又启动一份 exe」的递归问题。
 - 源码运行同样支持：`pythonw.exe dashboard/webview/app.py`。
@@ -78,7 +82,7 @@
 - 每次拉取会与上次快照比较，任务增减、进度变化、Buddy 旅行状态、补登卡、兑换档位、抽奖机会、能量和盲盒可开次数变化都会逐条写进日志。
 - 单次拉取部分接口失败时不会覆盖快照，也不会误报数据消失。
 
-### ⚙️ 脚本服务（Windows 计划任务）
+### ⚙️ 计划任务（Windows 任务计划程序）
 
 在控制台里直接管理后台签到，不需要再手敲 `schtasks`：
 
@@ -87,24 +91,42 @@
 | `WorkBuddyAutoSignin` | 每天 00:05 | 签到 + 成长中心 |
 | `WorkBuddyGrowthPoll` | 每天 01 / 05 / 09 / 13 / 17 / 21 点 | 补签（未签才签）+ 成长中心全套 |
 | `QoderDailyCredits` | 每天 5 次（按 UTC+8 10:00 刷新换算） | 查询并领取 Qoder CN 每日 100 Credits |
+| `TraeDailyCheckin` | 每天 5 次（默认 08:05 起，主时间可改） | Trae 多账号签到 + 剩余积分 |
 
 - 面板显示每个任务的状态（未安装 / 就绪 / 运行中 / 已停用）、上次运行时间、上次结果、下次运行时间，以及日志最后一行。
 - 支持**安装 / 修复、启用、停用、立即运行、停止、卸载**；安装和卸载需要二次确认。
 - 「立即运行」只启动第一个可运行的任务（优先签到任务），避免两个任务同时进入签到 / 成长中心。
-- 状态在空闲时每 3 分钟刷新一次，任务运行中每 20 秒刷新一次；停在 Qoder 页或窗口不可见时跳过轮询。
-- 打包运行时任务动作是 `Auto-claim-dashboard.exe --service silent` / `--service silent-poll`，因此 WorkBuddy 计划任务不需要系统 Python；Qoder 任务仍使用 `pythonw.exe qoder_signin.py silent`。
+- 状态在空闲时每 3 分钟刷新一次，任务运行中每 20 秒刷新一次；停在 Qoder / Trae 页或窗口不可见时跳过轮询。
+- 打包运行时任务动作是 `Auto-Claim-dashboard.exe --service silent` / `--service silent-poll`，因此 WorkBuddy 计划任务不需要系统 Python；Qoder 和 Trae 任务仍使用 `pythonw.exe <脚本> silent`。
 - 若安装时报 `0x80070005`（拒绝访问），用登录 WorkBuddy 的同一 Windows 账号、以管理员身份启动控制台后再安装。提权只用于注册任务，任务本身仍以普通权限运行。
 
 ### 🎁 Qoder CN 独立监控页
 
 - 侧边栏切换到 **Qoder CN**，页面首次打开时才查询，不在启动时联网；会记住上次停留的页面。
 - 4 张指标卡：可领取 Credits、本周期状态、登录态、计划任务。
+- **账号卡片**：展示 Qoder CN 头像、昵称、UID、掩码手机 / 邮箱、国内区域徽标、令牌到期、设备与可领取 Credits；卡片内可「签到」（`qoder_claim` → `auto`，二次确认）和「刷新」（`status` + `doctor`）。Qoder 凭据与设备标识来自本机 CN 客户端，没有应用侧账号库，因此 Trae 的编辑 / 换设备 / 停用 / 删除不适用。
 - 活动按 UTC+8 每天 10:00 刷新，每个窗口可领 100 Credits，领取后 30 天有效；**没有补领**，错过当天窗口就没了。
 - 展示活动 key、Credits、领取状态、领取窗口，以及账号目录、令牌来源 / 到期时间、设备标识与设备组件。
 - 自动读取 Qoder 登录态目前仅支持 **Windows**；macOS / Linux 可设置 `QODER_TOKEN`，但令牌会过期，不推荐长期保存。
 - 「领取今日 Credits」会真实调用领取接口，执行前二次确认；结果同时写入 Qoder 页日志和 `qoder_signin.log`。
-- Qoder 计划任务独立于 WorkBuddy 的两个任务，安装、启停、卸载互不影响。
+- Qoder 的「计划任务」卡片独立于 WorkBuddy 的两个任务，安装、启停、卸载互不影响。
 - Qoder 与 WorkBuddy 使用不同的锁和日志，互不等待。
+
+### ✈️ Trae 多账号签到页
+
+- 侧边栏切换到 **Trae**，页面首次打开时读取本地账号、签到历史、用量与日志；「刷新监控」本身不联网。
+- 4 张指标卡：今日获得、剩余积分、签到账号、计划任务。
+- **导入本机登录态**：只读扫描 Trae 桌面客户端的 `storage.json` 与 leveldb，使用 Windows CNG 解密 `iCubeAuthInfo://icube.cloudide` 中的 AES-128-CBC 登录态，再识别 Cloud-IDE-JWT / `X-Cloudide-Session`；也可以手动粘贴 Token 或会话 Cookie。
+- **多账号管理**：每个账号显示头像、来源、**国内 / 国际区域徽标**、签到状态、剩余积分与掩码设备号；可单独签到、刷新状态、设为主号、编辑、换设备、启停和删除。区域优先取 `iCubeAuthInfo` 的 `userRegion` / `host`，旧账号按客户端来源兜底，手动添加默认国内。
+- **账号卡片**：Trae / Qoder CN / WorkBuddy 三页共用同一套账号卡片布局，便于并排辨认与操作；Trae 保留多账号完整操作。
+- **计划任务**：Trae 的「计划任务」卡片直接位于账号卡片下方，只操作 `TraeDailyCheckin`，独立于 WorkBuddy / Qoder；修改自动签到时间后，需要重新「安装 / 修复」才会写入 Windows 任务。
+- **一键签到**：按设置的账号间隔逐个查询状态，未签到才领取，领取后重新查询以确认实际到账；非会员只计基础积分，会员额外计入连签奖励。
+- **主号视图**：签到状态、当月日历、签到历史和用量统计都以主号为准，账号列表仍展示全部账号。
+- **用量统计**：按所选天数拉取主号的会话用量，展示积分、Token、缓存命中、按模型汇总和逐会话明细，并列出即将过期的积分。
+- **签到历史**：每次成功签到写入本地 SQLite，页面按日期列出积分与会员标记。
+- **飞书推送**：在设置中填入机器人 Webhook 后，签到结果会推送到飞书；Webhook 保存在本地，界面不回显，可单独清除。
+- 账号中的 Token / Session 在 Windows 上用当前用户的 DPAPI 加密后落盘；页面与公开数据只显示掩码，不返回原文。
+- 与 Qoder 一样，Trae 使用独立的 `_TRAE_LOCK` 和日志，互不等待。
 
 ### 🎨 外观、启动与桌面集成
 
@@ -114,7 +136,7 @@
 - **托盘图标**：右键菜单提供「打开控制台 / 退出」；资源管理器重启后会自动重新注册。
 - **先就绪再显示**：窗口先以隐藏状态创建，等页面首帧就绪后再显示，避免看到 WebView2 初始化期间的白屏；兜底为 `loaded` 事件和 5 秒定时器。设 `WORKBUDDY_INSTANT_WINDOW=1` 可恢复「窗口立刻显示」。
 - **单实例**：第二个实例不会创建 WebView2，而是恢复并置前已有窗口。
-- **按区块懒加载**：指标卡 / 成长中心 / 脚本服务分别进入视口时才查询；启动阶段先用 `last_result.json`、`growth.json` 缓存填充，避免开场一片「—」。
+- **按区块懒加载**：指标卡 / 成长中心 / 计划任务分别进入视口时才查询；启动阶段先用 `last_result.json`、`growth.json` 缓存填充，避免开场一片「—」。
 
 ### 🛡️ 稳定性设计
 
@@ -133,10 +155,10 @@ python dashboard/webview/build_exe.py
 
 打包前会跑：
 
-- `app.py` / `win_guard.py` 语法检查
+- `app.py` / `win_guard.py` / `trae_signin.py` 语法检查
 - `app.js` 语法检查与前端事件回归测试
 - AST 重复代码检查、CSS 关键选择器检查
-- 冻结路径、单实例、原生图标、计划任务模块的单元测试
+- 冻结路径、单实例、原生图标、计划任务模块与 Trae 后端的单元测试
 
 打包后会：
 
@@ -173,15 +195,16 @@ python dashboard/webview/build_exe.py
 - **WorkBuddy 桌面端**已安装并登录过（脚本靠本机凭据鉴权）。
 - **Windows 10 / 11**（图形控制台）。CLI 脚本另外支持 macOS / Linux。
 - **WebView2 Runtime**：Windows 11 通常自带；Windows 10 若缺失，安装 Microsoft Edge WebView2 Evergreen Runtime。
-- **Python 3.10+**：源码运行或构建时需要；只运行打包好的 exe 时不需要（Qoder 计划任务除外，见下）。
+- **Python 3.10+**：源码运行或构建时需要；只运行打包好的 exe 时不需要（Qoder / Trae 任务除外，见下）。
 - 可选：**Qoder CN 桌面端**已登录，想顺便领每日 100 Credits。
+- 可选：**Trae 桌面端**已登录，想管理多账号签到与用量。
 - 可选：**Node.js**，仅构建流水线的前端检查需要（CI 使用 22）。
 
 ### 方式 A：从源码运行控制台
 
 ```powershell
-git clone https://github.com/HumanMus1c/Auto-claim.git
-cd Auto-claim
+git clone https://github.com/HumanMus1c/Auto-Claim.git
+cd Auto-Claim
 python -m pip install pywebview
 pythonw dashboard/webview/app.py
 ```
@@ -204,23 +227,24 @@ python dashboard/webview/build_exe.py
 产物：
 
 ```text
-Auto-claim-dashboard.exe
+Auto-Claim-dashboard.exe
 ```
 
 构建脚本会先跑单元测试和前端检查，任何一步失败都会中止。没有 Node.js 时，`node --check` / 前端回归测试会失败，请先安装 Node 或把 `node` 加入 `PATH`。
 
-> 仓库不收录构建产物。把生成的 exe 与 `signin.py`、`qoder_signin.py` 放在同一目录即可分发；`qoder_signin.py` 只在用 Qoder 页时需要。
+> 仓库不收录构建产物。把生成的 exe 与 `signin.py`、`qoder_signin.py`、`trae_signin.py` 放在同一目录即可分发；后两个脚本只在用对应页面时需要。
 
 ### 首次使用
 
-1. 确认 WorkBuddy 桌面端已登录；要用 Qoder 页的话，确认 Qoder CN 桌面端也已登录。
-2. 双击 `Auto-claim-dashboard.exe`（或按方式 A 启动）。
-3. 等顶部状态变成「就绪」，指标卡、成长中心和脚本服务会按区块自动加载。
-4. 在「脚本服务」点 **安装 / 修复**，注册两个 WorkBuddy 计划任务；需要时点 **立即运行** 做一次验证。
+1. 确认 WorkBuddy 桌面端已登录；要用 Qoder / Trae 页的话，确认对应桌面端也已登录。
+2. 双击 `Auto-Claim-dashboard.exe`（或按方式 A 启动）。
+3. 等顶部状态变成「就绪」，指标卡、成长中心和计划任务会按区块自动加载。
+4. 在「计划任务」点 **安装 / 修复**，注册两个 WorkBuddy 计划任务；需要时点 **立即运行** 做一次验证。
 5. 切到 **Qoder CN** 页，点 **安装 / 修复** 可单独注册 `QoderDailyCredits`；不装也不影响 WorkBuddy。
-6. 关闭控制台不会影响计划任务，后台签到仍由 Windows 任务计划程序托管。
+6. 切到 **Trae** 页，先点 **导入本机登录态**（或手动添加账号），需要自动签到时再安装 `TraeDailyCheckin`。
+7. 关闭控制台不会影响计划任务，后台签到仍由 Windows 任务计划程序托管。
 
-> 如果只想用命令行，不装控制台也完全可以：直接使用下方的 `signin.py` / `qoder_signin.py` 和安装脚本。
+> 如果只想用命令行，不装控制台也完全可以：直接使用下方的 `signin.py` / `qoder_signin.py` / `trae_signin.py` 和安装脚本。
 
 ---
 
@@ -229,13 +253,14 @@ Auto-claim-dashboard.exe
 ### WorkBuddy 页
 
 - **指标卡**：今日积分、连签天数、累计积分、凭据格式。
+- **账号卡片**：展示 WorkBuddy 本机账号的 UIN / UID 掩码、域名、国内区域徽标、登录状态、凭据格式和签到指标；卡片操作有「签到」（`claim` + `status`，二次确认）、「刷新」（`doctor` + `status`）和「查询签到」（仅 `status`）。WorkBuddy 账号来自本机客户端登录态，没有应用侧账号库，因此 Trae 的编辑 / 换设备 / 停用 / 删除不适用。
 - **操作按钮**：
   - `查签到状态 status` —— 只读查询；
   - `签到 + 成长中心 auto` —— 未签才领，再跑成长中心；
   - `仅成长中心 growth` —— 不碰签到，只领礼物 / 派 Buddy / 任务 / 补登 / 兑换 / 抽奖；
   - `仅领取今日签到 claim` —— 直接调领取接口，幂等；
   - `查询 + 领取 all` —— 调试用，先查再无条件领取。
-- **脚本服务**：两个 WorkBuddy 计划任务的状态与操作。
+- **计划任务**：两个 WorkBuddy 计划任务的状态与操作。
 - **成长中心**：五张概览卡 + 云端任务列表 + 进度。
 - **签到状态 / 本月签到**：并排展示详细字段和日历。
 - **运行日志**：带级别颜色、图标与复制按钮。
@@ -245,18 +270,33 @@ Auto-claim-dashboard.exe
 ### Qoder CN 页
 
 - **指标卡**：可领取 Credits、本周期状态、登录态、计划任务。
+- **账号卡片**：展示 Qoder CN 头像、昵称、UID、掩码手机 / 邮箱、国内区域徽标、令牌到期、设备与可领取 Credits；卡片内可「签到」（`qoder_claim` → `auto`，二次确认）和「刷新」（`status` + `doctor`）。Qoder 凭据与设备标识来自本机 CN 客户端，没有应用侧账号库，因此 Trae 的编辑 / 换设备 / 停用 / 删除不适用。
 - **刷新监控**：只读查询活动与登录态。
 - **领取今日 Credits**：真实写操作，执行前二次确认。
-- **Qoder 计划任务**：只操作 `QoderDailyCredits`，不碰 WorkBuddy 的两个任务。
+- **计划任务**：只操作 `QoderDailyCredits`，不碰 WorkBuddy 的两个任务。
 - **活动与领取状态 / 登录态与设备**：活动窗口、令牌到期、账号目录、设备组件。
 - **Qoder 日志**：读取 `qoder_signin.log` 末尾内容；手动领取结果也会补写。
 
+### Trae 页
+
+- **指标卡**：今日获得、剩余积分、签到账号、计划任务。
+- **刷新监控**：只读重新读取本地账号、历史、用量和日志，不访问 Trae 接口。
+- **一键签到**：真实写操作，执行前二次确认；已签到账号自动跳过。
+- **导入本机登录态**：只读扫描 Trae 客户端，识别并导入 Token / 会话 Cookie。
+- **添加账号 / 设置**：手动粘贴凭据、设置备注名、会员标记、自动签到时间、账号间隔、用量天数和飞书 Webhook。
+- **账号列表**：每个账号显示头像、来源、**国内 / 国际区域徽标**、签到状态、剩余积分与掩码设备号；可单独签到、刷新状态、设为主号、编辑、换设备、启停和删除。区域优先取 `iCubeAuthInfo` 的 `userRegion` / `host`，旧账号按客户端来源兜底，手动添加默认国内。
+- **统一账号卡片**：Trae / Qoder CN / WorkBuddy 三页复用同一套账号卡片布局；WorkBuddy / Qoder 为单账号，只移植了适用的签到与刷新。
+- **签到状态 / 本月签到**：以主号为准，显示今日签到、连签、本月天数、剩余积分和日历。
+- **用量统计 / 签到历史**：按天汇总模型、Token、缓存与积分，并列出最近签到记录。
+- **计划任务**：Trae 的「计划任务」卡片位于账号卡片下方，只操作 `TraeDailyCheckin`，不碰 WorkBuddy / Qoder 任务。
+- **Trae 日志**：读取 `trae_signin.log` 末尾内容；手动操作结果也会补写。
+
 ### 计划任务的实际命令
 
-| 场景 | WorkBuddy 任务动作 | Qoder 任务动作 |
-|---|---|---|
-| 打包运行 | `Auto-claim-dashboard.exe --service silent` / `--service silent-poll` | `pythonw.exe qoder_signin.py silent` |
-| 源码运行 | `pythonw.exe dashboard/webview/app.py --service silent` / `--service silent-poll` | 同上 |
+| 场景 | WorkBuddy 任务动作 | Qoder 任务动作 | Trae 任务动作 |
+|---|---|---|---|
+| 打包运行 | `Auto-Claim-dashboard.exe --service silent` / `--service silent-poll` | `pythonw.exe qoder_signin.py silent` | `pythonw.exe trae_signin.py silent` |
+| 源码运行 | `pythonw.exe dashboard/webview/app.py --service silent` / `--service silent-poll` | 同上 | 同上 |
 
 `--service` 分支不创建 WebView2，也不触发单实例锁，直接调用控制台后端的 `_invoke()`，最终仍然走 `signin.py` 的 `_run()`。因此计划任务和手工执行使用同一套签到逻辑。
 
@@ -286,6 +326,17 @@ python qoder_signin.py doctor          # 离线检查登录态与设备组件
 python qoder_signin.py status          # 只查活动列表
 python qoder_signin.py auto --dry-run  # 只报告会领到什么
 python qoder_signin.py auto            # 真实领取（幂等）
+```
+
+Trae：
+
+```bash
+python trae_signin.py import-local          # 只读导入本机 Trae 登录态
+python trae_signin.py status                # 查询所有启用账号的签到状态与积分
+python trae_signin.py auto                  # 多账号签到（已签到自动跳过）
+python trae_signin.py usage --days 7        # 同步主号最近 7 天用量
+python trae_signin.py doctor                # 离线检查数据目录、账号与平台能力
+python trae_signin.py silent                # 计划任务用，写 trae_signin.log
 ```
 
 ### 两种定时方式
@@ -318,6 +369,8 @@ Windows Qoder：
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install-qoder-windows.ps1
 ```
+
+Trae 目前没有独立安装脚本：在控制台 **Trae** 页点 **安装 / 修复** 即可注册 `TraeDailyCheckin`。它固定执行 `pythonw.exe <trae_signin.py 的绝对路径> silent`，主签到时间取自 Trae 设置，默认 08:05，并自动补排 +2 / +5 / +9 / +13 小时四次。
 
 macOS 使用仓库中的 `workbuddy-auto-signin.plist.example`，改好绝对路径后用 `launchctl bootstrap` 加载。模板内含三种触发：每天 00:05、每 4 小时、登录时。
 
@@ -364,14 +417,28 @@ Windows 上预算必须小于对应计划任务的 `ExecutionTimeLimit`（签到
 </details>
 
 <details>
+<summary><b>Trae 环境变量</b></summary>
+
+| 变量 | 作用 |
+|---|---|
+| `TRAE_DATA_DIR` | 账号与历史目录；默认 `%APPDATA%\Auto-Claim\trae` |
+| `TRAE_SIGNIN_LOG` | 日志路径（默认 `trae_signin.log`，落在脚本同目录） |
+| `TRAE_SIGNIN_LOG_EMPTY` | 设为 `1` 时静默空跑也写日志 |
+| `TRAE_BASE_URL` | 覆盖 API 端点，默认 `https://api.trae.cn` |
+
+</details>
+
+<details>
 <summary><b>控制台环境变量</b></summary>
 
 | 变量 | 作用 |
 |---|---|
 | `WORKBUDDY_DEMO_SIGNIN` | 直接指定 `signin.py` 路径，跳过自动搜索 |
 | `WORKBUDDY_QODER_SIGNIN` / `QODER_SIGNIN` | 直接指定 `qoder_signin.py` 路径 |
+| `WORKBUDDY_TRAE_SIGNIN` / `TRAE_SIGNIN` | 直接指定 `trae_signin.py` 路径 |
 | `QODER_SIGNIN_LOG` | Qoder 日志路径，同时也是监控页读取的日志 |
 | `QODER_AUTH_DIR` / `QODER_TOKEN` / `QODER_BASE_URL` | 透传给 `qoder_signin.py` |
+| `TRAE_DATA_DIR` / `TRAE_SIGNIN_LOG` / `TRAE_BASE_URL` | 透传给 `trae_signin.py`：账号目录、日志路径、API 端点 |
 | `WORKBUDDY_DEBUG` | `1` 时启用追踪与启动探针，写入 `trace.log` |
 | `WORKBUDDY_WATCHDOG` | `0` 时关闭 UI 看门狗（仅调试） |
 | `WORKBUDDY_HANG_DUMP` | `0` 时卡死不抓 minidump（只写线程栈） |
@@ -396,15 +463,26 @@ Windows 上预算必须小于对应计划任务的 `ExecutionTimeLimit`（签到
 
 Qoder 日志默认落在 `qoder_signin.py` 同目录；可用 `QODER_SIGNIN_LOG` 改到别处。
 
+Trae 的账号与历史不在控制台缓存目录，而在：
+
+```text
+%APPDATA%\Auto-Claim\trae\
+├── accounts.json      多账号（Token / Session 经 DPAPI 加密）
+└── checkin.db         签到历史与每日积分快照（SQLite）
+```
+
+Trae 日志默认是 `trae_signin.py` 同目录的 `trae_signin.log`，可用 `TRAE_SIGNIN_LOG` 覆盖；`TRAE_DATA_DIR` 可整体搬走数据目录。打包后同样要求 `trae_signin.py` 与 exe 并排。
+
 ---
 
 ## 🔐 安全与隐私
 
-- 只读取**你自己本机**的 WorkBuddy / Qoder CN 登录态；仓库不含、不内嵌、不传输任何第三方密钥。
+- 只读取**你自己本机**的 WorkBuddy / Qoder CN / Trae 登录态；仓库不含、不内嵌、不传输任何第三方密钥。
 - 永远不会打印 `accessToken`；`Authorization` 头不会出现在日志里。
 - 加密路径的密钥只在短生命周期的客户端子进程内使用；不写临时密钥文件、不缓存明文 token、不改写原凭据。
 - 凭据助手有独立超时及管道大小限制；原始助手输出不进入日志。
 - Qoder 使用 Windows DPAPI / CNG 解密本机登录态；令牌过期后需要重新打开一次 Qoder CN 桌面端。
+- Trae 的 Token / Session 在 Windows 上用当前用户的 DPAPI 加密后写入 `accounts.json`；页面只接收掩码字段。导入本机登录态只读扫描客户端文件，不上传凭据。
 - 控制台自己的缓存和日志写在 `%LOCALAPPDATA%\WorkBuddyDashboard\`，不写入程序目录。
 - 可以安全 fork、分享、在自己机器上运行 —— 它只作用于**你自己的**登录态。
 
@@ -413,9 +491,10 @@ Qoder 日志默认落在 `qoder_signin.py` 同目录；可用 `QODER_SIGNIN_LOG`
 ## 🗂️ 项目结构
 
 ```text
-Auto-claim/
+Auto-Claim/
 ├── signin.py                       # 上游签到 / 成长中心核心
 ├── qoder_signin.py                 # 上游 Qoder CN 领取脚本
+├── trae_signin.py                  # 移植自 TraeTools 的多账号签到 / 用量后端
 ├── install-windows.ps1             # 上游 WorkBuddy 计划任务安装
 ├── install-qoder-windows.ps1       # 上游 Qoder 计划任务安装
 ├── workbuddy-auto-signin.plist.example
@@ -428,7 +507,8 @@ Auto-claim/
 │   └── webview/
 │       ├── app.py                  # pywebview 后端 API
 │       ├── assets/                 # index.html / app.js / style.css / 图标
-│       ├── Auto-claim-dashboard.spec
+│       ├── test_trae_backend.py    # Trae 后端离线回归测试
+│       ├── Auto-Claim-dashboard.spec
 │       └── build_exe.py            # 检查 + 打包 + 产物校验
 ├── docs/                           # 控制台设计、打包、排障、卡死分析
 ├── tests/                          # 上游测试 + 成长中心快照差分测试
@@ -436,7 +516,7 @@ Auto-claim/
     └── dashboard.png               # README 控制台截图
 ```
 
-`dashboard/` 是本项目新增的主体；`signin.py` / `qoder_signin.py` / 安装脚本保持上游实现，便于继续合并上游更新。
+`dashboard/` 是控制台主体；`signin.py` / `qoder_signin.py` 与 WorkBuddy / Qoder 安装脚本保持上游实现，便于继续合并上游更新。`trae_signin.py` 是本项目对 TraeTools 后端的 Python 标准库移植。
 
 ---
 
@@ -476,6 +556,9 @@ python dashboard/webview/build_exe.py
 | 控制台没有窗口 / 白屏 | 确认 WebView2 Runtime 已安装；先试 `WORKBUDDY_INSTANT_WINDOW=1`；仍异常时开 `WORKBUDDY_DEBUG=1` 看 `trace.log` |
 | 控制台突然退出 | 看 `%LOCALAPPDATA%\WorkBuddyDashboard\watchdog.log` 与 `dumps\`；看门狗判定卡死时会主动退出以保护桌面 |
 | Qoder 任务安装失败 | 机器上没有可用的 `pythonw.exe`；安装 Python 3 或把 Python 加入 `PATH` |
+| Trae 导入不到账号 | 先登录 Trae 桌面端，再点「导入本机登录态」；也可以手动粘贴 Cloud-IDE-JWT 或 `X-Cloudide-Session` |
+| Trae 提示 `9074` | 设备号不合法；点账号的「换设备」重新生成 16 位数字设备号，每账号独立 |
+| Trae 任务安装失败 | 与 Qoder 相同，需要可用的 `pythonw.exe`；修改自动签到时间后要重新「安装 / 修复」 |
 | 轮询日志里查不到空跑 | 正常——轮询空跑默认不落盘；设 `WORKBUDDY_GROWTH_LOG_EMPTY=1` 可逐轮记录 |
 | 连登兑换「进阶」未解锁 | 正常——三档分别要连登满 7 / 14 / 28 天 |
 | 调试原始返回 | `python signin.py status` 或 `python signin.py all` |
@@ -487,11 +570,12 @@ python dashboard/webview/build_exe.py
 ## 🙏 致谢
 
 - **上游作者 [88lin](https://github.com/88lin)**：本项目的基础来自 [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin)。签到 / 成长中心接口、加密凭据处理、Qoder CN 领取、安装脚本和大量文档都由上游完成；没有这个项目，就没有本控制台。
+- **[star620/TraeTools](https://github.com/star620/TraeTools)**：Trae 的接口口径、登录态导入、用量统计、历史与飞书通知逻辑来自该项目（MIT）；本项目将其改写为只依赖 Python 标准库的 `trae_signin.py`。
 - 上游 `signin.py`、`qoder_signin.py` 和安装脚本在本项目中保持原实现，便于继续合并上游更新。
 - 感谢 **pywebview**、**Microsoft WebView2**、**PyInstaller**、**Pillow**（图标生成）和 **Node.js**（构建检查）提供运行 / 构建基础。
 - 本项目新增的控制台代码、文档与截图由 [HumanMus1c](https://github.com/HumanMus1c) 维护。
 
-如果这个项目对你有帮助，欢迎给[上游仓库](https://github.com/88lin/workbuddy-auto-signin)和[本项目](https://github.com/HumanMus1c/Auto-claim)各点一个 ⭐。
+如果这个项目对你有帮助，欢迎给[上游仓库](https://github.com/88lin/workbuddy-auto-signin)和[本项目](https://github.com/HumanMus1c/Auto-Claim)各点一个 ⭐。
 
 ---
 
@@ -500,7 +584,8 @@ python dashboard/webview/build_exe.py
 本项目沿用上游的 **MIT License**。
 
 - 上游 `signin.py`、`qoder_signin.py`、安装脚本及相关文档：Copyright (c) 2026 [88lin](https://github.com/88lin)
-- 本项目新增的 `dashboard/`、控制台文档与截图：Copyright (c) 2026 [HumanMus1c](https://github.com/HumanMus1c)
+- Trae 后端参考 [star620/TraeTools](https://github.com/star620/TraeTools)：Copyright (c) 2026 star620，MIT License
+- 本项目新增的 `dashboard/`、`trae_signin.py`、控制台文档与截图：Copyright (c) 2026 [HumanMus1c](https://github.com/HumanMus1c)
 
 完整许可文本见 [LICENSE](LICENSE)。你可以自由使用、修改、分发，包括商业用途，但需保留版权声明和许可声明。
 
@@ -508,4 +593,4 @@ python dashboard/webview/build_exe.py
 
 ## ⚠️ 免责声明
 
-> 本项目为**非官方**工具，与腾讯、WorkBuddy、Qoder CN 均无任何隶属关系。签到 / 领取接口系从桌面端行为逆向或推导得到，可能随时变动且不另行通知。使用风险自负；请遵守相关服务条款，仅用于个人自动化。
+> 本项目为**非官方**工具，与腾讯、WorkBuddy、Qoder CN、Trae 均无任何隶属关系。签到 / 领取接口系从桌面端行为逆向或推导得到，可能随时变动且不另行通知。使用风险自负；请遵守相关服务条款，仅用于个人自动化。

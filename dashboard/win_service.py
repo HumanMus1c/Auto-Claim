@@ -69,6 +69,25 @@ TASK_NAMES = tuple(TASK_BY_NAME)
 QODER_TASK_BY_NAME = {item["name"]: item for item in QODER_TASKS}
 QODER_TASK_NAMES = tuple(QODER_TASK_BY_NAME)
 
+# Trae 多账号签到独立任务；触发点由 trae_trigger_times() 按设置里的
+# 主时间生成，默认 08:05 起再补跑 4 次，覆盖漏签/睡眠唤醒。
+TRAE_TASKS = (
+    {
+        "name": "TraeDailyCheckin",
+        "label": "每日签到",
+        "when": "每天 5 次（08:05 起，按本机时间）",
+        "what": "多账号签到 + 剩余积分",
+        "action": "silent",
+        "minutes": 10,
+        "description": "Trae multi-account daily checkin (silent, zero token)",
+    },
+)
+TRAE_TASK_BY_NAME = {item["name"]: item for item in TRAE_TASKS}
+TRAE_TASK_NAMES = tuple(TRAE_TASK_BY_NAME)
+
+# 主触发点之后的小时偏移：+2/+5/+9/+13，覆盖白天与晚间
+TRAE_OFFSETS = (0, 2, 5, 9, 13)
+
 # Qoder 活动按 UTC+8 每天 10:00 刷新；主触发点晚 5 分钟，另排 4 次补跑。
 QODER_OFFSETS = (0, 1, 5, 9, 13)
 
@@ -569,6 +588,30 @@ def qoder_trigger_times(now=None):
             for h in QODER_OFFSETS]
 
 
+def trae_status(log_path=None):
+    """读取 TraeDailyCheckin 任务的安装、启用、运行与最近执行信息。"""
+    return status(log_path, TRAE_TASKS)
+
+
+def trae_action(verb):
+    """只操作 TraeDailyCheckin，不触碰 WorkBuddy / Qoder 任务。"""
+    return action(verb, TRAE_TASKS)
+
+
+def trae_trigger_times(primary="08:05"):
+    """把设置里的主签到时间展开成 5 个本机触发时间。"""
+    try:
+        base = datetime.datetime.strptime(str(primary or "08:05")[:5],
+                                          "%H:%M")
+    except ValueError:
+        base = datetime.datetime.strptime("08:05", "%H:%M")
+    times = []
+    for offset in TRAE_OFFSETS:
+        moment = base + datetime.timedelta(hours=offset)
+        times.append(moment.strftime("%H:%M"))
+    return times
+
+
 def find_pythonw():
     """定位 pythonw.exe，供 Qoder 计划任务使用。"""
     exe = os.path.abspath(sys.executable)
@@ -646,6 +689,79 @@ def install_qoder(signin_path, pythonw=None, workdir=None):
         "    [pscustomobject]@{",
         "        ok = $true",
         "        message = 'QoderDailyCredits 已安装并启用（每天 %s）'"
+        % " / ".join(times),
+        "        tasks = @([pscustomobject]@{",
+        "            name = $t.TaskName",
+        "            state = [string]$t.State",
+        "            next_run = if ($null -ne $i.NextRunTime -and $i.NextRunTime.Year -gt 2000) "
+        "{ $i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }",
+        "        })",
+        "    } | ConvertTo-Json -Depth 5 -Compress",
+        "} catch {",
+        "    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } | "
+        "ConvertTo-Json -Compress",
+        "}",
+    ]
+    raw = _parse_json(_run_ps("\n".join(lines), timeout=60))
+    if not isinstance(raw, dict):
+        raise RuntimeError("PowerShell 返回无法解析")
+    return {
+        "ok": bool(raw.get("ok")),
+        "message": raw.get("message") or raw.get("error") or "安装失败",
+        "tasks": raw.get("tasks") or [],
+    }
+
+
+def install_trae(signin_path, times=None, pythonw=None, workdir=None):
+    """注册/修复 TraeDailyCheckin，并回读确认。
+
+    与 Qoder 一样直接运行 ``pythonw trae_signin.py silent``，不依赖控制台
+    exe；任务名、触发器和动作都在服务端固定，前端不能传入任意命令。
+    """
+    if not supported():
+        raise RuntimeError("计划任务管理仅支持 Windows")
+    signin_path = os.path.abspath(signin_path)
+    if not os.path.isfile(signin_path):
+        raise RuntimeError("找不到 trae_signin.py：%s" % signin_path)
+
+    pythonw = pythonw or find_pythonw()
+    if not pythonw or not os.path.isfile(pythonw):
+        raise RuntimeError("未找到 pythonw.exe，请先安装 Python 3")
+    if workdir is None:
+        workdir = os.path.dirname(signin_path)
+
+    times = list(times or trae_trigger_times())
+    spec = TRAE_TASKS[0]
+    lines = [
+        _PREAMBLE,
+        "try {",
+        "    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+        "    $principal = New-ScheduledTaskPrincipal -UserId $user "
+        "-LogonType Interactive -RunLevel Limited",
+        "    $exe = %s" % _ps_quote(pythonw),
+        "    $wd = %s" % _ps_quote(workdir),
+        "    $targs = %s" % _ps_quote('"%s" silent' % signin_path),
+        "    $a = New-ScheduledTaskAction -Execute $exe -Argument $targs "
+        "-WorkingDirectory $wd",
+        "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
+        "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
+        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
+        "    $triggers = @()",
+        "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
+        "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
+        "    }",
+        "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
+        "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
+        "-Description %s -Force | Out-Null"
+        % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
+        "    $t = Get-ScheduledTask -TaskName %s -TaskPath '\\' -ErrorAction Stop"
+        % _ps_quote(spec["name"]),
+        "    $i = Get-ScheduledTaskInfo -TaskName %s -TaskPath '\\' -ErrorAction Stop"
+        % _ps_quote(spec["name"]),
+        "    if ($null -eq $t -or $null -eq $i) { throw '任务回读失败' }",
+        "    [pscustomobject]@{",
+        "        ok = $true",
+        "        message = 'TraeDailyCheckin 已安装并启用（每天 %s）'"
         % " / ".join(times),
         "        tasks = @([pscustomobject]@{",
         "            name = $t.TaskName",
