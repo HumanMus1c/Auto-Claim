@@ -99,6 +99,93 @@ ACTIONS = ("enable", "disable", "run", "stop", "uninstall")
 
 CREATE_NO_WINDOW = 0x08000000
 
+# 失败原因到「用户能照着做的一句话」的映射。
+# PowerShell 的原始报错（中文/英文/HRESULT）对普通用户毫无意义，界面卡片上
+# 必须给出可读结论 + 处置动作；原始文本只折叠进「详情」备查。
+SERVICE_HINTS = {
+    "python-missing": "安装 Python 3 后重试：命令行执行 "
+                      "winget install -e --id Python.Python.3.12，"
+                      "或从 python.org 下载安装（勾选 Add python.exe to PATH）。"
+                      "装到默认目录后可直接点「安装 / 修复」，不必重启控制台。",
+    "access-denied": "Windows 拒绝写入计划任务。请确认安全软件没有拦截 schtasks；"
+                     "仍失败时用同一个 Windows 账号打开「管理员 PowerShell」重试，"
+                     "或检查组策略里对任务计划程序的限制。",
+    "no-powershell": "系统缺少 PowerShell。请在「启用或关闭 Windows 功能」中确认 "
+                     "Windows PowerShell 未被移除，或安装 PowerShell 7 后重试。",
+    "timeout": "PowerShell 操作超时。请稍后重试；若反复超时，检查安全软件是否拖慢系统，"
+               "并到「任务计划程序」里手动确认同名任务的状态。",
+    "target-missing": "计划任务要运行的程序或脚本不在预期位置。请确认控制台 exe "
+                      "与 signin.py / qoder_signin.py / trae_signin.py 放在同一目录。",
+    "verify-failed": "任务写入后回读失败。请在「任务计划程序」中查看同名任务是否被"
+                     "安全软件锁定或已被删除，然后重试。",
+    "ps-failed": "PowerShell 执行失败。请展开「详情」查看原始报错；"
+                 "常见原因是同名任务被其他程序占用或受系统策略限制。",
+    "file-missing": "缺少脚本文件。请确认控制台 exe 与 signin.py / qoder_signin.py / "
+                    "trae_signin.py 放在同一目录。",
+    "unsupported": "计划任务只能注册在 Windows 上；当前系统不支持，"
+                   "请在 Windows 机器上使用控制台。",
+    "unknown": "请展开「详情」复制报错内容后重试；仍失败可到 GitHub 提交 issue。",
+}
+
+
+class ServiceError(RuntimeError):
+    """带「可读结论 + 解决办法」的失败。
+
+    code 让前端能分支（例如缺 Python 时高亮「去安装」），message 是卡片上
+    的一行结论，hint 是处置动作，detail 是 PowerShell / 系统原文。三者分开
+    存，是因为它们面向的读者不同：用户看 message + hint，排查看 detail。
+    """
+
+    def __init__(self, message, code="unknown", hint=None, detail=None):
+        super().__init__(message)
+        self.code = code
+        self.hint = hint or SERVICE_HINTS.get(code) or SERVICE_HINTS["unknown"]
+        self.detail = detail
+
+    def payload(self):
+        """转成前端可直接渲染的结构。"""
+        out = {"ok": False, "error": str(self), "code": self.code,
+               "hint": self.hint}
+        if self.detail:
+            out["detail"] = self.detail
+        return out
+
+
+def _classify(detail):
+    """把系统原始报错归类成 (code, 可读结论)。"""
+    text = detail or ""
+    low = text.lower()
+    if "拒绝访问" in text or "access is denied" in low or "0x80070005" in low:
+        return "access-denied", "Windows 拒绝写入计划任务（拒绝访问）"
+    if "pythonw" in low or "python3" in low or "python 3" in low:
+        return "python-missing", "缺失 Python 3 运行环境"
+    if ("找不到" in text or "not found" in low or "cannot find" in low
+            or "0x80070002" in low):
+        return "target-missing", "找不到计划任务要运行的程序或脚本"
+    return "ps-failed", "计划任务操作失败"
+
+
+def _error_payload(exc):
+    """把任意异常整理成前端可直接渲染的失败结构。
+
+    ServiceError 自带分类与处置建议；其它异常（OSError、JSONDecodeError 等）
+    现场再归类，避免上层到处写 isinstance 分支。
+    """
+    if isinstance(exc, ServiceError):
+        return exc.payload()
+    detail = "%s: %s" % (type(exc).__name__, exc)
+    code, message = _classify(detail)
+    if code == "ps-failed":
+        message = detail
+    return {"ok": False, "error": message, "code": code,
+            "hint": SERVICE_HINTS.get(code) or SERVICE_HINTS["unknown"],
+            "detail": detail}
+
+
+def describe_error(exc):
+    """公开入口：给控制台的失败统一成可读结构（供 app.py 调用）。"""
+    return _error_payload(exc)
+
 _PREAMBLE = r"""
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -129,7 +216,8 @@ def _run_ps(script, timeout=40):
     """执行一段 PowerShell，返回 stdout。脚本通过 UTF-16 编码传递，避开引号地狱。"""
     ps = _powershell()
     if not ps:
-        raise RuntimeError("未找到 PowerShell，无法管理计划任务")
+        raise ServiceError("未找到 PowerShell，无法管理计划任务",
+                           "no-powershell")
 
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     cmd = [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
@@ -148,12 +236,12 @@ def _run_ps(script, timeout=40):
                               encoding="utf-8", errors="replace",
                               timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired:
-        raise RuntimeError("PowerShell 操作超时（%d 秒）" % timeout)
+        raise ServiceError("PowerShell 操作超时（%d 秒）" % timeout, "timeout")
 
     if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError("PowerShell 退出码 %s：%s"
-                           % (proc.returncode, detail[-500:] or "无输出"))
+        detail = (proc.stderr or proc.stdout or "").strip()[-500:] or "无输出"
+        code, message = _classify(detail)
+        raise ServiceError(message, code, detail=detail)
     return proc.stdout or ""
 
 
@@ -287,9 +375,12 @@ def _empty_tasks(specs=TASKS):
 def _normalize_status(raw, log_path=None, specs=TASKS):
     """把 PowerShell 的原始对象整理成前端直接可用的结构。"""
     if not isinstance(raw, dict):
-        raise RuntimeError("PowerShell 返回无法解析")
+        raise ServiceError("PowerShell 返回无法解析，未能读取计划任务状态",
+                           "ps-failed")
     if not raw.get("ok"):
-        raise RuntimeError(raw.get("error") or "读取计划任务状态失败")
+        detail = raw.get("error") or "读取计划任务状态失败"
+        code, message = _classify(detail)
+        raise ServiceError(message, code, detail=detail)
 
     spec_by_name = {item["name"]: item for item in specs}
     tasks = []
@@ -369,10 +460,16 @@ def status(log_path=None, specs=TASKS):
         raw = _parse_json(_run_ps(_status_script(specs), timeout=25))
         return _normalize_status(raw, log_path, specs)
     except Exception as exc:
+        # 读不到状态也要把「为什么」和「怎么办」交给界面，否则卡片只会显示
+        # 「ServiceError: ...」这种对用户没有信息量的东西。
+        payload = _error_payload(exc)
         return {
             "supported": True,
             "ok": False,
-            "error": "%s: %s" % (type(exc).__name__, exc),
+            "error": payload["error"],
+            "code": payload["code"],
+            "hint": payload["hint"],
+            "detail": payload.get("detail"),
             "tasks": _empty_tasks(specs),
             "installed": False,
             "installed_count": 0,
@@ -461,20 +558,26 @@ def _install_script(runner, prefix_args, workdir):
 def install(runner, prefix_args, workdir=None):
     """注册/修复两个计划任务，并回读确认。"""
     if not supported():
-        raise RuntimeError("计划任务管理仅支持 Windows")
+        raise ServiceError("计划任务管理仅支持 Windows", "unsupported")
     if not runner or not os.path.isfile(runner):
-        raise RuntimeError("找不到运行计划任务的程序：%s" % runner)
+        raise ServiceError("找不到运行计划任务的程序，无法安装", "target-missing",
+                           detail=str(runner))
     if workdir is None:
         workdir = os.path.dirname(os.path.abspath(runner))
 
     raw = _parse_json(_run_ps(_install_script(runner, prefix_args, workdir),
                               timeout=60))
     if not isinstance(raw, dict):
-        raise RuntimeError("PowerShell 返回无法解析")
+        raise ServiceError("PowerShell 返回无法解析，安装未完成", "ps-failed")
+    if not raw.get("ok"):
+        detail = raw.get("error") or "安装失败"
+        code, text = _classify(detail)
+        raise ServiceError(text, code, detail=detail)
     return {
-        "ok": bool(raw.get("ok")),
-        "message": raw.get("message") or raw.get("error") or "安装失败",
+        "ok": True,
+        "message": raw.get("message") or "已安装并启用计划任务",
         "tasks": raw.get("tasks") or [],
+        "runner": "console",
     }
 
 
@@ -612,174 +715,279 @@ def trae_trigger_times(primary="08:05"):
     return times
 
 
-def find_pythonw():
-    """定位 pythonw.exe，供 Qoder 计划任务使用。"""
-    exe = os.path.abspath(sys.executable)
-    name = os.path.basename(exe).lower()
-    if name in ("python.exe", "pythonw.exe"):
-        candidate = os.path.join(os.path.dirname(exe), "pythonw.exe")
-        if os.path.isfile(candidate):
-            return candidate
+# python.org 安装器必写的位置；非默认目录安装也能从这里找到
+_PY_REGISTRY = (
+    r"SOFTWARE\Python\PythonCore",
+    r"SOFTWARE\WOW6432Node\Python\PythonCore",
+)
 
-    found = shutil.which("pythonw")
-    if found:
-        return found
+# 任务动作的来源，用于在界面上说明「这个任务靠谁跑」
+RUNTIME_LABEL = {
+    "pythonw": "系统 Python",
+    "console": "控制台内置运行时",
+}
 
-    roots = [
-        os.path.join(os.environ.get("LOCALAPPDATA", ""),
-                     "Programs", "Python", "Python3*", "pythonw.exe"),
-        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
-                     "Python3*", "pythonw.exe"),
-        r"C:\Python3*\pythonw.exe",
-    ]
-    for pattern in roots:
-        matches = sorted(glob.glob(pattern), reverse=True)
-        if matches:
-            return matches[0]
+
+def _registry_pythonw():
+    """从注册表读 python.org 版 Python 的 pythonw.exe。
+
+    「装到非默认目录 + 没勾 Add to PATH」是 Windows 上 Python 最常见的状态，
+    只靠 PATH 和固定目录会漏。注册表是官方安装器必写的，覆盖最全。
+    """
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+        for root in _PY_REGISTRY:
+            try:
+                key = winreg.OpenKey(hive, root)
+            except OSError:
+                continue
+            with key:
+                index = 0
+                while True:
+                    try:
+                        version = winreg.EnumKey(key, index)
+                    except OSError:
+                        break
+                    index += 1
+                    try:
+                        sub = winreg.OpenKey(key, version + r"\InstallPath")
+                    except OSError:
+                        continue
+                    with sub:
+                        # ExecutablePath 指向 python.exe；默认值才是安装目录
+                        for value_name in ("ExecutablePath", ""):
+                            try:
+                                value = winreg.QueryValueEx(sub, value_name)[0]
+                            except OSError:
+                                continue
+                            if not value:
+                                continue
+                            candidate = (value if value.lower().endswith(".exe")
+                                         else os.path.join(value, "pythonw.exe"))
+                            if os.path.basename(candidate).lower() == "python.exe":
+                                candidate = os.path.join(
+                                    os.path.dirname(candidate), "pythonw.exe")
+                            if os.path.isfile(candidate):
+                                return candidate
     return None
 
 
-def install_qoder(signin_path, pythonw=None, workdir=None):
+def _launcher_pythonw():
+    r"""用 py 启动器问出真实解释器路径。
+
+    这一条专治 Microsoft Store 的 python 存根：PATH 里那个
+    ``WindowsApps\python.exe`` 是 0 字节的转发器，同级没有 pythonw，
+    真正的解释器藏在 WindowsApps\PythonSoftwareFoundation.* 下面。
+    """
+    launcher = shutil.which("py") or os.path.join(
+        os.environ.get("SystemRoot", r"C:\Windows"), "py.exe")
+    if not launcher or not os.path.isfile(launcher):
+        return None
+
+    kwargs = {}
+    if supported():
+        kwargs["creationflags"] = CREATE_NO_WINDOW
+    try:
+        proc = subprocess.run(
+            [launcher, "-3", "-c", "import sys;print(sys.executable)"],
+            capture_output=True, text=True, timeout=10, **kwargs)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+
+    lines = (proc.stdout or "").strip().splitlines()
+    if not lines:
+        return None
+    candidate = os.path.join(os.path.dirname(lines[-1].strip()), "pythonw.exe")
+    return candidate if os.path.isfile(candidate) else None
+
+
+def _python_candidates():
+    """按可靠性顺序产出 pythonw.exe 候选路径。
+
+    注册表排在 PATH 之前是有意的：PATH 里可能是 venv 的临时解释器，也可能是
+    别的软件自带的私有运行时（例如控制台自己那套托管 Python），它们随时可能
+    被升级或删除；计划任务要长期存活，指向真正的安装版更稳。
+    """
+    exe = os.path.abspath(sys.executable)
+    if os.path.basename(exe).lower() in ("python.exe", "pythonw.exe"):
+        yield os.path.join(os.path.dirname(exe), "pythonw.exe")
+
+    yield _registry_pythonw()
+    yield shutil.which("pythonw")
+    yield _launcher_pythonw()
+
+    local = os.environ.get("LOCALAPPDATA", "")
+    program = os.environ.get("ProgramFiles", r"C:\Program Files")
+    program_x86 = os.environ.get("ProgramFiles(x86)",
+                                 r"C:\Program Files (x86)")
+    patterns = [
+        os.path.join(program, "Python3*", "pythonw.exe"),
+        os.path.join(program_x86, "Python3*", "pythonw.exe"),
+        r"C:\Python3*\pythonw.exe",
+    ]
+    if local:
+        # python.org 默认的「仅为当前用户安装」落在 LOCALAPPDATA 下
+        patterns.insert(0, os.path.join(local, "Programs", "Python",
+                                        "Python3*", "pythonw.exe"))
+        patterns.insert(1, os.path.join(local, "Programs", "Python", "*",
+                                        "pythonw.exe"))
+    for pattern in patterns:
+        for match in sorted(glob.glob(pattern), reverse=True):
+            yield match
+
+
+def find_pythonw():
+    """定位 pythonw.exe，供 Qoder / Trae 计划任务使用。
+
+    依次尝试：本进程解释器同级 → PATH → 注册表 → py 启动器 → 常见目录。
+    找不到返回 None，由调用方决定是退回控制台 exe 还是报「缺 Python」。
+    """
+    for candidate in _python_candidates():
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _task_command(signin_path, action, pythonw=None, runner=None,
+                  runner_args=None):
+    """决定计划任务要执行的命令：(exe, 参数字符串, 运行时来源)。
+
+    系统 Python 优先——与手工跑 install-windows.ps1 等价，行为可预期。
+    拿不到 pythonw 时退回控制台 exe 自身的子命令（``--trae-service`` 之类）：
+    exe 里已经打包了解释器，这样没装 Python 的机器也能装任务。此前这里直接
+    抛错，导致 Trae / Qoder 的任务在纯 exe 机器上永远装不上。
+    """
+    found = pythonw if (pythonw and os.path.isfile(pythonw)) else find_pythonw()
+    if found:
+        return found, '"%s" %s' % (signin_path, action), "pythonw"
+
+    if runner and os.path.isfile(runner):
+        base = " ".join(runner_args or [])
+        return runner, (base + " " + action).strip(), "console"
+
+    raise ServiceError(
+        "缺失 Python 3 运行环境，计划任务无法启动", "python-missing",
+        detail="未找到 pythonw.exe，且控制台程序不可用（runner=%r）" % (runner,))
+
+
+def _single_task_script(exe, args, workdir, spec, times, message):
+    """生成「注册一个任务 + 回读确认」的 PowerShell。
+
+    Qoder / Trae 的安装只差任务名、触发时间和动作参数，脚本体共用一份。
+    此前两处各写一遍，结果一边加了回读校验、另一边漏了——共用后不会再漂移。
+    """
+    name = _ps_quote(spec["name"])
+    return "\n".join([
+        _PREAMBLE,
+        "try {",
+        "    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
+        "    $principal = New-ScheduledTaskPrincipal -UserId $user "
+        "-LogonType Interactive -RunLevel Limited",
+        "    $exe = %s" % _ps_quote(exe),
+        "    $wd = %s" % _ps_quote(workdir),
+        "    $a = New-ScheduledTaskAction -Execute $exe -Argument %s "
+        "-WorkingDirectory $wd" % _ps_quote(args),
+        "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
+        "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
+        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
+        "    $triggers = @()",
+        "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
+        "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
+        "    }",
+        "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
+        "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
+        "-Description %s -Force | Out-Null"
+        % (name, _ps_quote(spec["description"])),
+        "    $t = Get-ScheduledTask -TaskName %s -TaskPath '\\' "
+        "-ErrorAction Stop" % name,
+        "    $i = Get-ScheduledTaskInfo -TaskName %s -TaskPath '\\' "
+        "-ErrorAction Stop" % name,
+        "    if ($null -eq $t -or $null -eq $i) { throw '任务回读失败' }",
+        "    [pscustomobject]@{",
+        "        ok = $true",
+        "        message = %s" % _ps_quote(message),
+        "        tasks = @([pscustomobject]@{",
+        "            name = $t.TaskName",
+        "            state = [string]$t.State",
+        "            next_run = if ($null -ne $i.NextRunTime -and $i.NextRunTime.Year -gt 2000) "
+        "{ $i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }",
+        "        })",
+        "    } | ConvertTo-Json -Depth 5 -Compress",
+        "} catch {",
+        "    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } | "
+        "ConvertTo-Json -Compress",
+        "}",
+    ])
+
+
+def _install_single_task(signin_name, signin_path, spec, times,
+                         pythonw=None, runner=None, runner_args=None,
+                         workdir=None):
+    """Qoder / Trae 共用的安装流程：定命令 → 注册 → 回读 → 结构化结果。"""
+    if not supported():
+        raise ServiceError("计划任务管理仅支持 Windows", "unsupported")
+
+    signin_path = os.path.abspath(signin_path)
+    if not os.path.isfile(signin_path):
+        raise ServiceError("找不到 %s，无法安装计划任务" % signin_name,
+                           "file-missing", detail=signin_path)
+    if workdir is None:
+        workdir = os.path.dirname(signin_path)
+
+    exe, args, source = _task_command(signin_path, spec["action"],
+                                      pythonw=pythonw, runner=runner,
+                                      runner_args=runner_args)
+    times = list(times)
+    runtime = RUNTIME_LABEL.get(source, source)
+    message = "%s 已安装并启用（每天 %s，使用%s）" % (
+        spec["name"], " / ".join(times), runtime)
+
+    raw = _parse_json(_run_ps(
+        _single_task_script(exe, args, workdir, spec, times, message),
+        timeout=60))
+    if not isinstance(raw, dict):
+        raise ServiceError("PowerShell 返回无法解析，安装未完成", "ps-failed")
+    if not raw.get("ok"):
+        detail = raw.get("error") or "安装失败"
+        code, text = _classify(detail)
+        raise ServiceError(text, code, detail=detail)
+    return {
+        "ok": True,
+        "message": raw.get("message") or message,
+        "tasks": raw.get("tasks") or [],
+        "runner": source,
+        "runner_path": exe,
+    }
+
+
+def install_qoder(signin_path, pythonw=None, workdir=None,
+                  runner=None, runner_args=None):
     """注册/修复 QoderDailyCredits，并回读确认。
 
-    刻意不复用 WorkBuddy 的 runner：Qoder 任务直接运行 ``pythonw qoder_signin.py
-    silent``，不依赖控制台 exe。任务名、触发器和动作全部在服务端固定。
+    命令优先用系统 pythonw 跑 ``qoder_signin.py silent``；找不到 pythonw 时
+    退回控制台 exe 的 ``--qoder-service``（runner 由调用方给出，exe 内已
+    打包解释器）。任务名、触发器和动作全部在服务端固定，前端不能传入任意命令。
     """
-    if not supported():
-        raise RuntimeError("计划任务管理仅支持 Windows")
-    signin_path = os.path.abspath(signin_path)
-    if not os.path.isfile(signin_path):
-        raise RuntimeError("找不到 qoder_signin.py：%s" % signin_path)
-
-    pythonw = pythonw or find_pythonw()
-    if not pythonw or not os.path.isfile(pythonw):
-        raise RuntimeError("未找到 pythonw.exe，请先安装 Python 3")
-    if workdir is None:
-        workdir = os.path.dirname(signin_path)
-
-    times = qoder_trigger_times()
-    spec = QODER_TASKS[0]
-    lines = [
-        _PREAMBLE,
-        "try {",
-        "    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
-        "    $principal = New-ScheduledTaskPrincipal -UserId $user "
-        "-LogonType Interactive -RunLevel Limited",
-        "    $exe = %s" % _ps_quote(pythonw),
-        "    $wd = %s" % _ps_quote(workdir),
-        "    $qargs = %s" % _ps_quote('"%s" silent' % signin_path),
-        "    $a = New-ScheduledTaskAction -Execute $exe -Argument $qargs "
-        "-WorkingDirectory $wd",
-        "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
-        "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
-        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
-        "    $triggers = @()",
-        "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
-        "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
-        "    }",
-        "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
-        "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
-        "-Description %s -Force | Out-Null"
-        % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
-        "    $t = Get-ScheduledTask -TaskName %s -TaskPath '\\' -ErrorAction Stop"
-        % _ps_quote(spec["name"]),
-        "    $i = Get-ScheduledTaskInfo -TaskName %s -TaskPath '\\' -ErrorAction Stop"
-        % _ps_quote(spec["name"]),
-        "    if ($null -eq $t -or $null -eq $i) { throw '任务回读失败' }",
-        "    [pscustomobject]@{",
-        "        ok = $true",
-        "        message = 'QoderDailyCredits 已安装并启用（每天 %s）'"
-        % " / ".join(times),
-        "        tasks = @([pscustomobject]@{",
-        "            name = $t.TaskName",
-        "            state = [string]$t.State",
-        "            next_run = if ($null -ne $i.NextRunTime -and $i.NextRunTime.Year -gt 2000) "
-        "{ $i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }",
-        "        })",
-        "    } | ConvertTo-Json -Depth 5 -Compress",
-        "} catch {",
-        "    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } | "
-        "ConvertTo-Json -Compress",
-        "}",
-    ]
-    raw = _parse_json(_run_ps("\n".join(lines), timeout=60))
-    if not isinstance(raw, dict):
-        raise RuntimeError("PowerShell 返回无法解析")
-    return {
-        "ok": bool(raw.get("ok")),
-        "message": raw.get("message") or raw.get("error") or "安装失败",
-        "tasks": raw.get("tasks") or [],
-    }
+    return _install_single_task("qoder_signin.py", signin_path,
+                                QODER_TASKS[0], qoder_trigger_times(),
+                                pythonw=pythonw, runner=runner,
+                                runner_args=runner_args, workdir=workdir)
 
 
-def install_trae(signin_path, times=None, pythonw=None, workdir=None):
+def install_trae(signin_path, times=None, pythonw=None, workdir=None,
+                 runner=None, runner_args=None):
     """注册/修复 TraeDailyCheckin，并回读确认。
 
-    与 Qoder 一样直接运行 ``pythonw trae_signin.py silent``，不依赖控制台
-    exe；任务名、触发器和动作都在服务端固定，前端不能传入任意命令。
+    与 Qoder 同一套流程：pythonw 优先，控制台 exe 兜底。
     """
-    if not supported():
-        raise RuntimeError("计划任务管理仅支持 Windows")
-    signin_path = os.path.abspath(signin_path)
-    if not os.path.isfile(signin_path):
-        raise RuntimeError("找不到 trae_signin.py：%s" % signin_path)
-
-    pythonw = pythonw or find_pythonw()
-    if not pythonw or not os.path.isfile(pythonw):
-        raise RuntimeError("未找到 pythonw.exe，请先安装 Python 3")
-    if workdir is None:
-        workdir = os.path.dirname(signin_path)
-
-    times = list(times or trae_trigger_times())
-    spec = TRAE_TASKS[0]
-    lines = [
-        _PREAMBLE,
-        "try {",
-        "    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name",
-        "    $principal = New-ScheduledTaskPrincipal -UserId $user "
-        "-LogonType Interactive -RunLevel Limited",
-        "    $exe = %s" % _ps_quote(pythonw),
-        "    $wd = %s" % _ps_quote(workdir),
-        "    $targs = %s" % _ps_quote('"%s" silent' % signin_path),
-        "    $a = New-ScheduledTaskAction -Execute $exe -Argument $targs "
-        "-WorkingDirectory $wd",
-        "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
-        "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
-        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
-        "    $triggers = @()",
-        "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
-        "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
-        "    }",
-        "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
-        "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
-        "-Description %s -Force | Out-Null"
-        % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
-        "    $t = Get-ScheduledTask -TaskName %s -TaskPath '\\' -ErrorAction Stop"
-        % _ps_quote(spec["name"]),
-        "    $i = Get-ScheduledTaskInfo -TaskName %s -TaskPath '\\' -ErrorAction Stop"
-        % _ps_quote(spec["name"]),
-        "    if ($null -eq $t -or $null -eq $i) { throw '任务回读失败' }",
-        "    [pscustomobject]@{",
-        "        ok = $true",
-        "        message = 'TraeDailyCheckin 已安装并启用（每天 %s）'"
-        % " / ".join(times),
-        "        tasks = @([pscustomobject]@{",
-        "            name = $t.TaskName",
-        "            state = [string]$t.State",
-        "            next_run = if ($null -ne $i.NextRunTime -and $i.NextRunTime.Year -gt 2000) "
-        "{ $i.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }",
-        "        })",
-        "    } | ConvertTo-Json -Depth 5 -Compress",
-        "} catch {",
-        "    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } | "
-        "ConvertTo-Json -Compress",
-        "}",
-    ]
-    raw = _parse_json(_run_ps("\n".join(lines), timeout=60))
-    if not isinstance(raw, dict):
-        raise RuntimeError("PowerShell 返回无法解析")
-    return {
-        "ok": bool(raw.get("ok")),
-        "message": raw.get("message") or raw.get("error") or "安装失败",
-        "tasks": raw.get("tasks") or [],
-    }
+    return _install_single_task("trae_signin.py", signin_path,
+                                TRAE_TASKS[0],
+                                times or trae_trigger_times(),
+                                pythonw=pythonw, runner=runner,
+                                runner_args=runner_args, workdir=workdir)

@@ -232,8 +232,11 @@ def load_session():
     dirs = find_auth_dirs()
     looked_in = [str(d) for d in dirs]
     if not dirs:
-        raise NoAuthError("没找到 %APPDATA%\\%s，请先安装并登录 Qoder CN 桌面端"
-                          % AUTH_DIR_GLOB, looked_in)
+        # 这里不能用 % 格式化：文案里的 %APPDATA% 会被当成格式符，
+        # 抛出 "unsupported format character 'A'" —— 于是「没登录」这种
+        # 最常见的状态反而变成 ValueError，用户完全看不懂。
+        raise NoAuthError("没找到 %APPDATA%\\{}，请先安装并登录 Qoder CN 桌面端"
+                          .format(AUTH_DIR_GLOB), looked_in)
 
     errors = []
     saw_auth_file = False

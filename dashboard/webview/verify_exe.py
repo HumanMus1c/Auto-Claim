@@ -20,12 +20,17 @@ FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 "_growth_snapshot", "_growth_changes",
                 "acquire_single_instance", "UIWatchdog",
                 "IconManager", "_load_trae", "trae_monitor",
-                "trae_service_status", "trae_account_action"]
+                "trae_service_status", "trae_account_action",
+                # 计划任务解耦系统 Python：exe 自服务入口 + 可读失败提示
+                "_side_service_main", "--trae-service", "--qoder-service",
+                "describe_error", "_missing_script",
+                # 窗口位置/尺寸记忆
+                "win_geometry", "ensure_visible"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
 # 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。
 REQUIRED_ENTRIES = ["win_theme.py", "win_title.py", "win_guard.py",
-                    "win_service.py", "win_icon.py"]
+                    "win_service.py", "win_icon.py", "win_geometry.py"]
 
 
 def main():

@@ -1432,6 +1432,97 @@ function makeServiceNode(t) {
   return el;
 }
 
+/* ---------- 计划任务失败提示（三张卡片共用） ----------
+ *
+ * 安装/读取失败时不能只在日志面板留一行：之前失败后卡片直接退回「未安装」，
+ * 用户看到的就是「点了没反应」。这里在卡片上明确给出「是什么问题」和
+ * 「下一步怎么办」，原始报错折叠进「技术详情」备查。
+ */
+
+const SERVICE_HINT = {
+  'python-missing': '缺失 Python 3 运行环境。请安装 Python 3（python.org 下载，'
+    + '或命令行 winget install -e --id Python.Python.3.12），'
+    + '装完回到本页重试即可，不必重启控制台。',
+  'access-denied': 'Windows 拒绝写入计划任务。请确认安全软件没有拦截 schtasks；'
+    + '仍失败时用同一个账号打开「管理员 PowerShell」重试。',
+  'no-powershell': '系统缺少 PowerShell。请在「启用或关闭 Windows 功能」中'
+    + '确认 Windows PowerShell 未被移除。',
+  'timeout': 'PowerShell 操作超时。请稍后重试；反复超时请检查安全软件是否拖慢系统。',
+  'target-missing': '找不到任务要运行的程序。请确认控制台 exe 与 signin.py / '
+    + 'qoder_signin.py / trae_signin.py 在同一目录。',
+  'verify-failed': '任务写入后回读失败。请到「任务计划程序」确认同名任务是否被占用。',
+  'ps-failed': 'PowerShell 执行失败。请展开「技术详情」查看原始报错后重试。',
+  'file-missing': '缺少脚本文件。请把对应的 signin 脚本与控制台 exe 放在同一目录。',
+  'unsupported': '计划任务只能注册在 Windows 上，请换到 Windows 机器使用控制台。',
+  'ipc-failed': '界面与后台通信失败。请重试一次；仍失败可重启控制台。',
+  'status-failed': '读取计划任务状态失败。请点「刷新状态」重试。',
+  'unknown': '请展开「技术详情」复制报错后重试；仍失败可到 GitHub 提交 issue。',
+};
+
+const SVC_ALERTS = {};
+
+function setServiceAlert(elId, result) {
+  if (result && result.ok === false) {
+    SVC_ALERTS[elId] = {
+      title: result.error || result.message || '操作失败',
+      hint: result.hint || SERVICE_HINT[result.code] || SERVICE_HINT.unknown,
+      detail: result.detail || '',
+      fromStatus: false,
+    };
+  } else if (!result) {
+    delete SVC_ALERTS[elId];
+  }
+  paintServiceAlert(elId);
+}
+
+function syncServiceAlert(elId, status, what) {
+  const stored = SVC_ALERTS[elId];
+  if (status && status.ok === false) {
+    SVC_ALERTS[elId] = {
+      title: what + '失败：' + (status.error || '未知错误'),
+      hint: status.hint || SERVICE_HINT[status.code] || SERVICE_HINT['status-failed'],
+      detail: status.detail || '',
+      fromStatus: true,
+    };
+  } else if (stored && stored.fromStatus) {
+    // 状态恢复后清掉「读取失败」，但不覆盖安装失败的提示（它还没被解决）
+    delete SVC_ALERTS[elId];
+  }
+  paintServiceAlert(elId);
+}
+
+function paintServiceAlert(elId) {
+  const el = $(elId);
+  if (!el) return;
+  const info = SVC_ALERTS[elId];
+  el.textContent = '';
+  if (!info) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+
+  const title = document.createElement('strong');
+  title.textContent = info.title;
+  el.appendChild(title);
+
+  const hint = document.createElement('span');
+  hint.className = 'svc-alert-hint';
+  hint.textContent = info.hint;
+  el.appendChild(hint);
+
+  if (info.detail) {
+    const box = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.textContent = '技术详情';
+    const code = document.createElement('code');
+    code.textContent = info.detail;
+    box.appendChild(summary);
+    box.appendChild(code);
+    el.appendChild(box);
+  }
+}
+
 function renderService(s) {
   SERVICE = s || {};
   const supported = SERVICE.supported !== false;
@@ -1487,6 +1578,9 @@ function renderService(s) {
     summary.textContent = '仅安装了 ' + SERVICE.installed_count
       + ' / 2 个计划任务，点击「安装 / 修复」补齐。';
   }
+
+  syncServiceAlert('svcAlert', (supported && !ok) ? SERVICE : null,
+    '读取计划任务状态');
 
   const box = $('svcTasks');
   box.innerHTML = '';
@@ -1602,8 +1696,10 @@ function serviceAction(action) {
   call('service_action', action)
     .then((r) => {
       if (r && r.ok) {
+        setServiceAlert('svcAlert', null);
         appendLog('脚本服务：' + (r.message || (label + '完成')), 'ok');
       } else {
+        setServiceAlert('svcAlert', r || { ok: false, error: '操作失败' });
         appendLog('脚本服务：' + ((r && (r.error || r.message)) || '操作失败'), 'err');
       }
       if (r && r.status) {
@@ -1613,7 +1709,11 @@ function serviceAction(action) {
         return refreshService(true);
       }
     })
-    .catch((e) => appendLog('脚本服务调用失败：' + e, 'err'))
+    .catch((e) => {
+      setServiceAlert('svcAlert', { ok: false, error: '调用后台失败：' + e,
+        code: 'ipc-failed' });
+      appendLog('脚本服务调用失败：' + e, 'err');
+    })
     .finally(() => {
       SVC_BUSY = false;
       refreshService(true).finally(() => setServiceBusy(false));
@@ -2200,6 +2300,9 @@ function renderQoderService(s) {
     summary.textContent = 'QoderDailyCredits 已安装但被停用；点击「启用」恢复自动领取。';
   }
 
+  syncServiceAlert('qsvcAlert', (supported && !ok) ? QODER_SERVICE : null,
+    '读取 Qoder 计划任务状态');
+
   const box = $('qsvcTasks');
   box.innerHTML = '';
   tasks.forEach((t) => box.appendChild(makeServiceNode(t)));
@@ -2311,15 +2414,21 @@ function qoderServiceAction(action) {
   call('qoder_service_action', action)
     .then((r) => {
       if (r && r.ok) {
+        setServiceAlert('qsvcAlert', null);
         appendQoderLog('Qoder 计划任务：' + (r.message || (label + '完成')), 'ok');
       } else {
+        setServiceAlert('qsvcAlert', r || { ok: false, error: '操作失败' });
         appendQoderLog('Qoder 计划任务：'
           + ((r && (r.error || r.message)) || '操作失败'), 'err');
       }
       if (r && r.status) renderQoderService(r.status);
       else return refreshQoderService(true);
     })
-    .catch((e) => appendQoderLog('Qoder 计划任务调用失败：' + e, 'err'))
+    .catch((e) => {
+      setServiceAlert('qsvcAlert', { ok: false, error: '调用后台失败：' + e,
+        code: 'ipc-failed' });
+      appendQoderLog('Qoder 计划任务调用失败：' + e, 'err');
+    })
     .finally(() => {
       QODER_SVC_BUSY = false;
       refreshQoderService(true).finally(() => setQoderServiceBusy(false));
@@ -3514,6 +3623,9 @@ function renderTraeService(s) {
     log.title = '';
   }
 
+  syncServiceAlert('tsvcAlert', (supported && !ok) ? TRAE_SERVICE : null,
+    '读取 Trae 计划任务状态');
+
   let taskText = '—';
   let taskHint = '未检测';
   if (!supported) {
@@ -3600,15 +3712,21 @@ function traeServiceAction(action) {
   call('trae_service_action', action)
     .then((r) => {
       if (r && r.ok) {
+        setServiceAlert('tsvcAlert', null);
         appendTraeLog('Trae 计划任务：' + (r.message || (label + '完成')), 'ok');
       } else {
+        setServiceAlert('tsvcAlert', r || { ok: false, error: '操作失败' });
         appendTraeLog('Trae 计划任务：'
           + ((r && (r.error || r.message)) || '操作失败'), 'err');
       }
       if (r && r.status) renderTraeService(r.status);
       else return refreshTraeService(true);
     })
-    .catch((e) => appendTraeLog('Trae 计划任务调用失败：' + e, 'err'))
+    .catch((e) => {
+      setServiceAlert('tsvcAlert', { ok: false, error: '调用后台失败：' + e,
+        code: 'ipc-failed' });
+      appendTraeLog('Trae 计划任务调用失败：' + e, 'err');
+    })
     .finally(() => {
       TRAE_SVC_BUSY = false;
       refreshTraeService(true).finally(() => setTraeServiceBusy(false));
