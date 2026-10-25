@@ -26,7 +26,7 @@
     DirectComposition 表面，避免整个 DWM/任务栏被拖住。
 
 日志默认由调用方传入，通常为：
-    %LOCALAPPDATA%\\WorkBuddyDashboard\\watchdog.log
+    %LOCALAPPDATA%\\Auto-Claim\\dashboard\\watchdog.log
 """
 
 from __future__ import annotations
@@ -39,6 +39,8 @@ import threading
 import time
 from ctypes import wintypes
 
+# 互斥量名称保留 WorkBuddyDashboard：升级时新旧进程共用同一把锁，
+# 避免过渡期同时跑两套 WebView2。它不是用户可见的数据路径。
 MUTEX_NAME = r"Local\WorkBuddyDashboard.SingleInstance"
 WINDOW_TITLE = "Auto-Claim 控制台"
 

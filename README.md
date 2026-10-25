@@ -142,7 +142,7 @@
 
 - **UI 看门狗**：同时检查 `IsHungAppWindow()`、`WM_NULL` 响应和前端每 5 秒一次的心跳；连续判定卡死时写入所有 Python 线程栈、抓取原生 minidump，然后立即退出，避免拖住 DWM / 任务栏。
 - **异常不丢**：后台线程统一包一层 `_safe_worker()`，即使没有控制台，异常也会进入日志并复位忙碌状态。
-- **运行期文件不落程序目录**：日志、缓存、崩溃记录和 dump 全部写到 `%LOCALAPPDATA%\WorkBuddyDashboard\`，打包后不会被临时解包目录带走。
+- **运行期文件不落程序目录**：日志、缓存、崩溃记录和 dump 全部写到 `%LOCALAPPDATA%\Auto-Claim\dashboard\`，打包后不会被临时解包目录带走。
 - **面板刷新不抢锁**：`tasks()` / `growth()` 非阻塞加锁，长命令执行期间界面仍可操作，拿不到数据就快速提示「有命令正在执行」。
 
 ### 🧪 构建与验证流水线
@@ -451,15 +451,20 @@ Windows 上预算必须小于对应计划任务的 `ExecutionTimeLimit`（签到
 ### 运行时文件
 
 ```text
-%LOCALAPPDATA%\WorkBuddyDashboard\
+%LOCALAPPDATA%\Auto-Claim\dashboard\
 ├── last_result.json   上次查询结果（下次启动先渲染，再刷新）
 ├── growth.json        上次成长中心快照（缓存 + 数据变化比较基线）
 ├── run.log            历史日志（界面日志区的持久化副本）
 ├── crash.log          Python 与前端 JS 的异常
 ├── watchdog.log       UI 看门狗日志；探测记录、卡死线程栈
 ├── dumps\             卡死时抓的原生 minidump（最多保留 3 份）
+├── webview2\          WebView2 用户数据（固定一份，不再每次启动写 %TEMP%）
 └── trace.log          仅 WORKBUDDY_DEBUG=1 时产生
 ```
+
+旧版目录 `%LOCALAPPDATA%\WorkBuddyDashboard\` 会在升级后首次启动时自动迁移；若迁移失败（例如旧进程仍占用日志），本次继续使用旧目录，下次启动再重试。
+
+旧版 pywebview 还会在 `%TEMP%\tmpXXXX\EBWebView` 下按次留下 WebView2 缓存，退出时不会自动回收；新版固定使用上表的 `webview2\`，不再按次生成。升级后如需清理旧缓存，请先确认没有其他 pywebview 程序正在运行。
 
 Qoder 日志默认落在 `qoder_signin.py` 同目录；可用 `QODER_SIGNIN_LOG` 改到别处。
 
@@ -483,7 +488,7 @@ Trae 日志默认是 `trae_signin.py` 同目录的 `trae_signin.log`，可用 `T
 - 凭据助手有独立超时及管道大小限制；原始助手输出不进入日志。
 - Qoder 使用 Windows DPAPI / CNG 解密本机登录态；令牌过期后需要重新打开一次 Qoder CN 桌面端。
 - Trae 的 Token / Session 在 Windows 上用当前用户的 DPAPI 加密后写入 `accounts.json`；页面只接收掩码字段。导入本机登录态只读扫描客户端文件，不上传凭据。
-- 控制台自己的缓存和日志写在 `%LOCALAPPDATA%\WorkBuddyDashboard\`，不写入程序目录。
+- 控制台自己的缓存和日志写在 `%LOCALAPPDATA%\Auto-Claim\dashboard\`，不写入程序目录。
 - 可以安全 fork、分享、在自己机器上运行 —— 它只作用于**你自己的**登录态。
 
 ---
@@ -554,7 +559,7 @@ python dashboard/webview/build_exe.py
 | `NETWORK / 网络不可达` | 断网或服务端不可用，**不是**登录问题；等下一次运行或检查网络 |
 | 安装计划任务报 `0x80070005` | 用登录 WorkBuddy 的同一账号、以管理员身份启动控制台后再安装 |
 | 控制台没有窗口 / 白屏 | 确认 WebView2 Runtime 已安装；先试 `WORKBUDDY_INSTANT_WINDOW=1`；仍异常时开 `WORKBUDDY_DEBUG=1` 看 `trace.log` |
-| 控制台突然退出 | 看 `%LOCALAPPDATA%\WorkBuddyDashboard\watchdog.log` 与 `dumps\`；看门狗判定卡死时会主动退出以保护桌面 |
+| 控制台突然退出 | 看 `%LOCALAPPDATA%\Auto-Claim\dashboard\watchdog.log` 与 `dumps\`；看门狗判定卡死时会主动退出以保护桌面 |
 | Qoder 任务安装失败 | 机器上没有可用的 `pythonw.exe`；安装 Python 3 或把 Python 加入 `PATH` |
 | Trae 导入不到账号 | 先登录 Trae 桌面端，再点「导入本机登录态」；也可以手动粘贴 Cloud-IDE-JWT 或 `X-Cloudide-Session` |
 | Trae 提示 `9074` | 设备号不合法；点账号的「换设备」重新生成 16 位数字设备号，每账号独立 |

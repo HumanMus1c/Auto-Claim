@@ -15,6 +15,7 @@ JS 通过 window.pywebview.api.* 调用这里的函数。
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -565,20 +566,87 @@ def _invoke_qoder(action, dry_run=False, once=False):
     return code, "\n".join(captured)
 
 
+# 运行期数据目录：与 Trae 的 %APPDATA%\Auto-Claim\trae 对称，
+# 控制台自己的日志、缓存和窗口状态统一放在 LocalAppData 下。
+DATA_DIR_NAME = "Auto-Claim"
+DATA_DIR_SUBDIR = "dashboard"
+LEGACY_DATA_DIR_NAME = "WorkBuddyDashboard"
+
+_diag_lock = threading.Lock()
+
+
+def _local_appdata_dir():
+    return os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+
+
+def _move_or_copy_dir(legacy, folder):
+    """优先原子移动旧目录；失败时复制到暂存目录再改名。
+
+    返回 ``"move"`` / ``"copy"``，都失败时返回 ``None``。复制走
+    ``.migrating.<pid>`` 暂存目录，避免被杀毒软件或旧进程打断后留下半套数据。
+    """
+    try:
+        os.replace(legacy, folder)
+        return "move"
+    except OSError:
+        pass
+
+    staging = "%s.migrating.%d" % (folder, os.getpid())
+    copied = True
+    try:
+        shutil.copytree(legacy, staging)
+        os.replace(staging, folder)
+    except Exception:
+        copied = False
+    # 成功时 staging 已被改名，失败时清掉半成品；两种情况都安全。
+    shutil.rmtree(staging, ignore_errors=True)
+    return "copy" if copied else None
+
+
+def _migrate_legacy_dir(legacy, folder):
+    """把旧版 %LOCALAPPDATA%\\WorkBuddyDashboard 搬到新目录。
+
+    旧进程还开着 watchdog.log 时 rename 会失败，这时退回复制。
+    返回是否迁移成功。
+    """
+    try:
+        os.makedirs(os.path.dirname(folder), exist_ok=True)
+    except OSError:
+        return False
+
+    outcome = _move_or_copy_dir(legacy, folder)
+    if outcome == "copy":
+        # 复制成功后旧目录只是副本；删不掉也不影响使用。
+        shutil.rmtree(legacy, ignore_errors=True)
+    return outcome is not None
+
+
 def _diag_dir():
-    """诊断与历史日志的落盘目录。
+    """诊断、缓存与窗口状态的落盘目录。
 
     不能用 ASSETS：打包后它是 %TEMP% 下的解包目录，进程一退整个目录
     就被删掉，写进去的崩溃日志会跟着一起消失——于是 exe 里的异常
     彻底查无实据。必须落在用户目录这种真正持久的地方。
+
+    旧版目录（WorkBuddyDashboard）在首次启动时自动迁移；迁移失败就继续
+    用旧目录，下一次启动再试，避免日志和窗口位置在新旧两份里分叉。
     """
-    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
-    folder = os.path.join(base, "WorkBuddyDashboard")
-    try:
-        os.makedirs(folder, exist_ok=True)
-    except OSError:
-        return HERE
-    return folder
+    base = _local_appdata_dir()
+    folder = os.path.join(base, DATA_DIR_NAME, DATA_DIR_SUBDIR)
+    legacy = os.path.join(base, LEGACY_DATA_DIR_NAME)
+
+    with _diag_lock:
+        ready = True
+        if not os.path.isdir(folder) and os.path.isdir(legacy):
+            ready = _migrate_legacy_dir(legacy, folder)
+        if ready:
+            try:
+                os.makedirs(folder, exist_ok=True)
+            except OSError:
+                ready = False
+    if ready and os.path.isdir(folder):
+        return folder
+    return legacy if os.path.isdir(legacy) else HERE
 
 
 def _log_path():
@@ -2257,9 +2325,15 @@ def main():
     # gui="edgechromium" 是必须的，不能省。
     # pywebview 6.2.1 在这台机器上自动后端探测会失败（webview.guilib 一直是 None），
     # start() 表现为静默挂起、不建窗口也不报错，只能靠显式指定后端绕开。
+    #
+    # storage_path 也必须显式给：private_mode 下 pywebview 会把 WebView2
+    # 缓存丢进 %TEMP%\\tmpXXXX，每次启动新建一份、退出也不回收——实测攒了
+    # 上百份、1.4 GB。固定到数据目录后只保留一份，也便于用户统一清理。
     try:
         webview.start(gui="edgechromium", debug=False,
-                      icon=icon_path(initial_theme["dark"]))
+                      icon=icon_path(initial_theme["dark"]),
+                      private_mode=True,
+                      storage_path=os.path.join(_diag_dir(), "webview2"))
     finally:
         manager = icon_holder["manager"]
         if manager is not None:

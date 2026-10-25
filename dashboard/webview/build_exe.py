@@ -77,7 +77,8 @@ def pre_checks():
     if run("单元测试", [PY, "-X", "utf8", "-m", "unittest",
                         "test_locate_signin", "test_win_guard",
                         "test_win_service", "test_win_icon",
-                        "test_win_geometry", "test_trae_backend"]) != 0:
+                        "test_win_geometry", "test_trae_backend",
+                        "test_data_dir"]) != 0:
         failed.append("单元测试未通过")
 
     return failed

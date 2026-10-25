@@ -2,7 +2,7 @@
 
 控制台每次启动都回到 1180x800 的默认位置：用户把窗口拖到副屏、拉大看日志，
 下次启动又被打回原点，每次都得重调一遍。这里把窗口矩形存进
-``%LOCALAPPDATA%\\WorkBuddyDashboard\\window.json``，下次启动原样恢复。
+``%LOCALAPPDATA%\\Auto-Claim\\dashboard\\window.json``，下次启动原样恢复。
 
 几条刻意的约束：
 

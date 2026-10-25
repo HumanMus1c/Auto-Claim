@@ -103,7 +103,7 @@ def _safe_worker(self, action, spec):
 |---|---|
 | 现象 | exe 里的任何异常都查无实据，界面异常后什么痕迹都没有 |
 | 根因 | `crash.log` 写在 `HERE`、`run.log` 写在 `ASSETS`，冻结后它们都在 `%TEMP%\_MEIxxxx`，**进程退出整个目录被删** |
-| 修法 | 统一到用户目录：`_diag_dir()` → `%LOCALAPPDATA%\WorkBuddyDashboard\`，并让前端 JS 异常也通过 `log_error()` 落盘 |
+| 修法 | 统一到用户目录：`_diag_dir()` → `%LOCALAPPDATA%\Auto-Claim\dashboard\`，并让前端 JS 异常也通过 `log_error()` 落盘 |
 
 这一条本身不修复任何缺陷，但它**是解开僵局的那一步**——改完才第一次看见真实错误：
 

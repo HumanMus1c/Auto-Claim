@@ -107,7 +107,7 @@ Trae 的 `trae_monitor()` 不联网：它读取 `accounts.json`、`checkin.db`�
 
 成长中心走 `GET /v2/activity/growth/{tasks,buddy/travel/status,streak,heatmap,redeem/summary,lottery/chances,energy,buddy/quota}`，认证链路直接复用 `signin.py` 的 `find_auth_file` / `resolve_session` / `build_headers` / `get`，不另写一份 crypto。所有请求都是 GET；只有 `run('auto' / 'growth')` 会触发写操作。
 
-每次拉取会与 `%LOCALAPPDATA%\WorkBuddyDashboard\growth.json` 里的上次快照比较：
+每次拉取会与 `%LOCALAPPDATA%\Auto-Claim\dashboard\growth.json` 里的上次快照比较：
 
 - 任务新增/移除、状态或进度变化
 - Buddy 旅行状态、地点、今日名额
@@ -190,7 +190,7 @@ pythonw.exe <trae_signin.py 的绝对路径> silent
 
 两者都在 `dashboard/win_guard.py`，只依赖 Win32 `ctypes`。
 
-- **单实例**：启动时创建命名互斥量 `Local\WorkBuddyDashboard.SingleInstance`。第二个实例不会创建 WebView2，而是找到已有窗口并恢复/置前；已有窗口无响应时给出原生提示后退出。
+- **单实例**：启动时创建命名互斥量 `Local\WorkBuddyDashboard.SingleInstance`（名称保留旧值，保证升级过渡期新旧进程仍互斥）。第二个实例不会创建 WebView2，而是找到已有窗口并恢复/置前；已有窗口无响应时给出原生提示后退出。
 - **UI 看门狗**：后台线程每 1 秒检查一次主窗口，同时看三路信号：Windows 自己的 `IsHungAppWindow()`（和任务管理器“未响应”、WER `AppHangB1` 同一套 5 秒判定）、`SendMessageTimeoutW(WM_NULL, 1000ms)`，以及前端每 5 秒一次的 `Api.heartbeat()` 端到端心跳。连续 2 次（约 2–3 秒）判定卡死时，写入所有 Python 线程栈、抓一份原生 minidump，然后 `os._exit(3)`，立即释放 WebView2 子进程和 DirectComposition 表面，避免整个 DWM/任务栏被拖住。
 
   只看 `WM_NULL` 是不够的：2026-10-20 那次 `AppHangB1` 里 Windows 已判定窗口 idle，旧版看门狗却一次失败都没记录到。现在每次判定正常也会每 2 分钟写一行 `探测正常`，用于区分“真的正常”和“看门狗根本没在跑”。
@@ -202,15 +202,20 @@ pythonw.exe <trae_signin.py 的绝对路径> silent
 全部落在用户目录，不在程序目录也不在临时解包目录：
 
 ```text
-%LOCALAPPDATA%\WorkBuddyDashboard\
+%LOCALAPPDATA%\Auto-Claim\dashboard\
 ├── last_result.json   上次查询结果（下次启动先渲染，再刷新）
 ├── growth.json        上次成长中心快照（成长中心缓存 + 数据变化比较基线）
 ├── run.log            历史日志（界面日志区的持久化副本，含成长中心变化）
 ├── crash.log          Python 与前端 JS 的异常
 ├── watchdog.log       UI 看门狗日志；探测记录、卡死线程栈
 ├── dumps\             卡死时抓的原生 minidump（hang-*.dmp，最多保留 3 份）
+├── webview2\          WebView2 用户数据（固定一份，不再每次启动写 %TEMP%）
 └── trace.log          仅 WORKBUDDY_DEBUG=1 时产生，见下
 ```
+
+旧版目录 `%LOCALAPPDATA%\WorkBuddyDashboard\` 会在升级后首次启动时自动迁移；迁移失败则继续使用旧目录，下次启动重试。
+
+旧版 pywebview 还会在 `%TEMP%\tmpXXXX\EBWebView` 下按次留下 WebView2 缓存，退出时不会自动回收；新版通过 `storage_path` 固定到 `webview2\`，不再按次生成。升级后如需清理旧缓存，请先确认没有其他 pywebview 程序正在运行。
 
 Qoder 是独立脚本，默认日志 `qoder_signin.log` 落在 `qoder_signin.py` 同目录（源码运行即仓库根目录），不在 `%LOCALAPPDATA%` 下；可用 `QODER_SIGNIN_LOG` 改到别处。打包后同样要求 `qoder_signin.py` 与 exe 并排，和 `signin.py` 的分发方式一致。
 

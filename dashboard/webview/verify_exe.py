@@ -25,7 +25,9 @@ FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 "_side_service_main", "--trae-service", "--qoder-service",
                 "describe_error", "_missing_script",
                 # 窗口位置/尺寸记忆
-                "win_geometry", "ensure_visible"]
+                "win_geometry", "ensure_visible",
+                # 数据目录改名 + 旧目录迁移，以及固定 WebView2 缓存目录
+                "_migrate_legacy_dir", "webview2"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
 # 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。

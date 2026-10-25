@@ -125,7 +125,7 @@ UI 线程在 5 秒内没有调用 `PeekMessage`，和任务管理器显示“未
 - 退出前：
   - 写所有 Python 线程栈到 `watchdog.log`；
   - 用 `MiniDumpWriteDump` 抓一份原生 minidump 到
-    `%LOCALAPPDATA%\WorkBuddyDashboard\dumps\hang-*.dmp`（最多保留 3 份）；
+    `%LOCALAPPDATA%\Auto-Claim\dashboard\dumps\hang-*.dmp`（最多保留 3 份）；
   - 启动一个 20 秒的硬退出兜底，防止转储本身卡住。
 - 每 2 分钟写一行 `探测正常：... 心跳=...`。下次就能直接看出看门狗
   是否还活着、心跳是否正常。
@@ -167,7 +167,7 @@ WebView2 前会追加：
 
 ## 下次复现时怎么取证
 
-1. 先看 `%LOCALAPPDATA%\WorkBuddyDashboard\watchdog.log`：
+1. 先看 `%LOCALAPPDATA%\Auto-Claim\dashboard\watchdog.log`：
 
    ```text
    探测正常：...            ← 看门狗活着
@@ -183,7 +183,7 @@ WebView2 前会追加：
 2. 用 WinDbg 打开 dump：
 
    ```text
-   windbg -z "%LOCALAPPDATA%\WorkBuddyDashboard\dumps\hang-*.dmp"
+   windbg -z "%LOCALAPPDATA%\Auto-Claim\dashboard\dumps\hang-*.dmp"
    ```
 
    ```text
