@@ -64,6 +64,10 @@ def pre_checks():
     if run("前端事件回归测试", ["node", js_test]) != 0:
         failed.append("前端事件回归测试未通过")
 
+    js_alert = os.path.join(HERE, "test_service_alert.js")
+    if run("计划任务失败提示回归测试", ["node", js_alert]) != 0:
+        failed.append("计划任务失败提示回归测试未通过")
+
     if run("重复代码检查", [PY, os.path.join(HERE, "check_dup.py")]) != 0:
         failed.append("存在重复代码块")
 
@@ -73,7 +77,7 @@ def pre_checks():
     if run("单元测试", [PY, "-X", "utf8", "-m", "unittest",
                         "test_locate_signin", "test_win_guard",
                         "test_win_service", "test_win_icon",
-                        "test_trae_backend"]) != 0:
+                        "test_win_geometry", "test_trae_backend"]) != 0:
         failed.append("单元测试未通过")
 
     return failed

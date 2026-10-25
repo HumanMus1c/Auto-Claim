@@ -8,6 +8,8 @@ JS 通过 window.pywebview.api.* 调用这里的函数。
   - 命令统一走进程内 _run()（不用 subprocess，避免打包后递归启动）
   - 每个耗时调用都走后台线程 + 完成事件，界面不会被长超时请求卡住
   - 路径与超时集中在这里，前端只管渲染
+  - 计划任务通过 --service / --qoder-service / --trae-service 三个无窗口
+    入口回调本 exe，三条链路都不依赖系统 Python
 """
 
 import io
@@ -200,14 +202,26 @@ def _trae_log_path():
     return os.path.join(os.path.dirname(os.path.abspath(TRAE)), "trae_signin.log")
 
 
-def _service_runner():
+SERVICE_ENTRY = {
+    "workbuddy": "--service",
+    "qoder": "--qoder-service",
+    "trae": "--trae-service",
+}
+
+
+def _service_runner(kind="workbuddy"):
     """计划任务要启动的命令：可执行文件 + 固定前置参数。
 
-    打包后直接运行本 exe 的 --service 模式，任务不依赖系统 Python；
-    源码运行时则用 pythonw.exe 跑 app.py，避免弹出控制台窗口。
+    打包后直接运行本 exe 的对应子命令（``--service`` / ``--qoder-service`` /
+    ``--trae-service``），任务完全不依赖系统 Python；源码运行时则用
+    pythonw.exe 跑 app.py，避免弹出控制台窗口。
+
+    Qoder / Trae 早先只认系统 pythonw，纯 exe 机器上安装必然失败；现在它们
+    也走这里，只是入口参数不同。
     """
+    flag = SERVICE_ENTRY.get(kind, "--service")
     if getattr(sys, "frozen", False):
-        return sys.executable, ["--service"]
+        return sys.executable, [flag]
 
     exe = os.path.abspath(sys.executable)
     folder, name = os.path.split(exe)
@@ -215,7 +229,57 @@ def _service_runner():
         pythonw = os.path.join(folder, "pythonw.exe")
         if os.path.isfile(pythonw):
             exe = pythonw
-    return exe, [os.path.abspath(__file__), "--service"]
+    return exe, [os.path.abspath(__file__), flag]
+
+
+def _service_error(exc):
+    """把安装/操作失败整理成前端可直接渲染的结构。
+
+    带 code / hint / detail：卡片上要给用户一句能读懂的话和下一步动作，
+    光有「失败」既解释不了原因也给不出办法。
+    """
+    try:
+        import win_service
+        return win_service.describe_error(exc)
+    except Exception:
+        return {"ok": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "code": "unknown",
+                "hint": "请展开「详情」复制报错后重试；仍失败可到 GitHub 提交 issue。"}
+
+
+def _missing_script(name, label):
+    """脚本缺失时的统一失败结构。"""
+    return {"ok": False,
+            "error": "未找到 %s，无法安装 %s 计划任务" % (name, label),
+            "code": "file-missing",
+            "hint": "请把 %s 与控制台 exe 放在同一目录后重试。" % name,
+            "detail": name}
+
+
+def _service_status_failure(exc):
+    """读状态失败时返回的完整状态结构。
+
+    前端三张卡片按同一份字段渲染，失败时也必须给出 code / hint，
+    否则卡片只剩「读取失败：ServiceError: ...」这种没用的话。
+    """
+    payload = _service_error(exc)
+    return {
+        "supported": os.name == "nt",
+        "ok": False,
+        "error": payload["error"],
+        "code": payload["code"],
+        "hint": payload["hint"],
+        "detail": payload.get("detail"),
+        "tasks": [],
+        "installed": False,
+        "installed_count": 0,
+        "enabled": False,
+        "running": False,
+        "next_run": None,
+        "last_run": None,
+        "log": None,
+    }
 
 
 def _system_theme():
@@ -252,6 +316,27 @@ def icon_path(dark=None):
         return path
     path = os.path.join(ASSETS, "icon.ico")
     return path if os.path.isfile(path) else None
+
+
+def _load_geometry(module, folder):
+    """读回上次的窗口矩形。模块缺失/文件损坏都退回空字典（交给系统居中）。"""
+    saved = {}
+    if module is not None:
+        try:
+            saved = module.load(folder) or {}
+            _trace("窗口几何: %r" % (saved,))
+        except Exception as exc:
+            _trace("读取窗口几何失败: %r" % (exc,))
+    return saved
+
+
+def _track_geometry(module, window, folder, saved):
+    """把窗口几何事件接到跟踪器上；模块缺失时返回 None。异常交给调用方兜。"""
+    if module is None:
+        return None
+    tracker = module.Tracker(folder, saved)
+    tracker.bind(window)
+    return tracker
 
 
 def _native_handle(native):
@@ -1386,19 +1471,7 @@ class Api:
             import win_service
             return win_service.status(_signin_log_path())
         except Exception as exc:
-            return {
-                "supported": os.name == "nt",
-                "ok": False,
-                "error": "%s: %s" % (type(exc).__name__, exc),
-                "tasks": [],
-                "installed": False,
-                "installed_count": 0,
-                "enabled": False,
-                "running": False,
-                "next_run": None,
-                "last_run": None,
-                "log": None,
-            }
+            return _service_status_failure(exc)
 
     def service_action(self, action):
         """安装/卸载/启用/停用/立即运行/停止后台计划任务。
@@ -1414,16 +1487,15 @@ class Api:
             import win_service
             if action == "install":
                 if not os.path.isfile(SIGNIN):
-                    result = {"ok": False, "error": "未找到 signin.py，无法安装计划任务"}
+                    result = _missing_script("signin.py", "WorkBuddy")
                 else:
-                    runner, prefix = _service_runner()
+                    runner, prefix = _service_runner("workbuddy")
                     result = win_service.install(
                         runner, prefix, workdir=os.path.dirname(SIGNIN))
             else:
                 result = win_service.action(action)
         except Exception as exc:
-            result = {"ok": False,
-                      "error": "%s: %s" % (type(exc).__name__, exc)}
+            result = _service_error(exc)
 
         result["status"] = self.service_status()
         text = result.get("message") or result.get("error") or "操作完成"
@@ -1549,19 +1621,7 @@ class Api:
             import win_service
             return win_service.qoder_status(_qoder_log_path())
         except Exception as exc:
-            return {
-                "supported": os.name == "nt",
-                "ok": False,
-                "error": "%s: %s" % (type(exc).__name__, exc),
-                "tasks": [],
-                "installed": False,
-                "installed_count": 0,
-                "enabled": False,
-                "running": False,
-                "next_run": None,
-                "last_run": None,
-                "log": None,
-            }
+            return _service_status_failure(exc)
 
     def qoder_service_action(self, action):
         """安装/卸载/启用/停用/立即运行/停止 Qoder 计划任务。"""
@@ -1575,16 +1635,18 @@ class Api:
             import win_service
             if action == "install":
                 if not os.path.isfile(QODER):
-                    error = "未找到 qoder_signin.py，无法安装计划任务"
+                    error = _missing_script("qoder_signin.py", "Qoder")
                 else:
-                    result = win_service.install_qoder(QODER)
+                    runner, prefix = _service_runner("qoder")
+                    result = win_service.install_qoder(
+                        QODER, runner=runner, runner_args=prefix)
             else:
                 result = win_service.qoder_action(action)
         except Exception as exc:
-            error = "%s: %s" % (type(exc).__name__, exc)
+            error = _service_error(exc)
 
         if result is None:
-            result = {"ok": False, "error": error}
+            result = error or {"ok": False, "error": "Qoder 计划任务安装失败"}
         result["status"] = self.qoder_service_status()
         text = result.get("message") or result.get("error") or "操作完成"
         _append_log("Qoder 计划任务 %s: %s" % (action, text))
@@ -1807,19 +1869,7 @@ class Api:
             import win_service
             return win_service.trae_status(_trae_log_path())
         except Exception as exc:
-            return {
-                "supported": os.name == "nt",
-                "ok": False,
-                "error": "%s: %s" % (type(exc).__name__, exc),
-                "tasks": [],
-                "installed": False,
-                "installed_count": 0,
-                "enabled": False,
-                "running": False,
-                "next_run": None,
-                "last_run": None,
-                "log": None,
-            }
+            return _service_status_failure(exc)
 
     def trae_service_action(self, action):
         """安装/卸载/启用/停用/立即运行/停止 Trae 计划任务。"""
@@ -1833,7 +1883,7 @@ class Api:
             import win_service
             if action == "install":
                 if not os.path.isfile(TRAE):
-                    error = "未找到 trae_signin.py，无法安装计划任务"
+                    error = _missing_script("trae_signin.py", "Trae")
                 else:
                     try:
                         trae = _load_trae()
@@ -1842,14 +1892,16 @@ class Api:
                     except Exception:
                         primary = "08:05"
                     times = win_service.trae_trigger_times(primary)
-                    result = win_service.install_trae(TRAE, times=times)
+                    runner, prefix = _service_runner("trae")
+                    result = win_service.install_trae(
+                        TRAE, times=times, runner=runner, runner_args=prefix)
             else:
                 result = win_service.trae_action(action)
         except Exception as exc:
-            error = "%s: %s" % (type(exc).__name__, exc)
+            error = _service_error(exc)
 
         if result is None:
-            result = {"ok": False, "error": error}
+            result = error or {"ok": False, "error": "Trae 计划任务安装失败"}
         result["status"] = self.trae_service_status()
         text = result.get("message") or result.get("error") or "操作完成"
         _append_log("Trae 计划任务 %s: %s" % (action, text))
@@ -1931,6 +1983,42 @@ def _service_main(argv):
     return code if isinstance(code, int) else 1
 
 
+def _side_service_main(name, loader, argv):
+    """``--qoder-service`` / ``--trae-service``：计划任务专用入口。
+
+    直接调用对应脚本的 main()，与手工执行
+    ``python qoder_signin.py silent`` 完全等价：结果由脚本自己的 emit()
+    写进日志，进程不创建窗口、不碰 pywebview。
+
+    存在的理由是解掉「计划任务必须依赖系统 Python」这个硬依赖：exe 里已经
+    打包了解释器，找不到 pythonw 时任务可以直接指向 exe 自己。
+    """
+    action = argv[0] if argv else "silent"
+    if action not in ("silent", "auto"):
+        _append_log("[%s] 未知或缺少动作：%r（可用：silent / auto）"
+                    % (name, action))
+        return 2
+
+    try:
+        module = loader()
+        # qoder_signin 的时间预算在模块加载时记下，长期驻留的进程里要重置，
+        # 否则「预算耗尽」会让任务什么都不做。
+        if hasattr(module, "_started_at"):
+            module._started_at = time.monotonic()
+        code = module.main([action])
+        return code if isinstance(code, int) else 1
+    except Exception as exc:
+        import traceback
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        _append_log("[%s] %s 启动失败：%s" % (name, action, detail))
+        try:
+            with open(_crash_path(), "a", encoding="utf-8") as fh:
+                fh.write("[%s %s] %s\n" % (name, action, detail))
+        except Exception:
+            pass
+        return 1
+
+
 def main():
     import webview
 
@@ -1954,6 +2042,14 @@ def main():
         # 打包校验会检查 win_guard.py 是否真的进了 exe；这里只做 fail-open。
         _trace("win_guard 不可用: %r" % (exc,))
         win_guard = None
+
+    try:
+        import win_geometry
+    except Exception as exc:
+        # 窗口位置记忆同样只是体验优化：模块缺失（旧包/裁剪包）也不能让
+        # 控制台起不来，顶多是每次回到默认位置。
+        _trace("win_geometry 不可用: %r" % (exc,))
+        win_geometry = None
 
     if win_guard is not None:
         try:
@@ -2048,12 +2144,21 @@ def main():
         os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
             _args + " " + _flags).strip()
 
+    # 窗口位置/尺寸：用户拖过一次就该记住，不必每次启动都手工摆回来。
+    # 读不到（首次运行、文件损坏）时返回默认尺寸且不带 x/y，交给 pywebview 居中。
+    saved_geometry = _load_geometry(win_geometry, _diag_dir())
+
     window = webview.create_window(
         title,
         os.path.join(ASSETS, "index.html"),
         js_api=api,
-        width=1180,
-        height=800,
+        width=saved_geometry.get("width", 1180),
+        height=saved_geometry.get("height", 800),
+        x=saved_geometry.get("x"),
+        y=saved_geometry.get("y"),
+        # 上次是最大化就还原成最大化；此时 x/y/width/height 只作为「还原后
+        # 回到哪」的备用值，由系统自己处理。
+        maximized=bool(saved_geometry.get("maximized")),
         min_size=(940, 640),
         # 先隐藏：WebView2 初始化 + 首次导航期间窗口只有一块主题底色
         # （就是之前看到的"空白窗口"），等页面首帧就绪后再显示。
@@ -2063,6 +2168,36 @@ def main():
     # 立刻绑定：bootstrap / system_theme 等调用发生在 start() 之前，
     # _push 要靠它把结果送回前端
     api._window = window
+
+    try:
+        geometry = _track_geometry(win_geometry, window, _diag_dir(),
+                                   saved_geometry)
+    except Exception as exc:
+        _trace("窗口几何记忆未启用: %r" % (exc,))
+        geometry = None
+    geometry_checked = {"done": False}
+
+    def _verify_geometry(*_):
+        """窗口真正出现后校验一次：旧坐标可能落在已拔掉的副屏之外。
+
+        这一步必须在有 HWND 之后做——用物理像素比对显示器工作区，
+        才不会因为 DPI 换算把「其实在屏幕里」的窗口误判成飞出桌面。
+        """
+        if geometry is None or geometry_checked["done"]:
+            return
+        geometry_checked["done"] = True
+        if not geometry.restored_position:
+            return
+        try:
+            result = win_geometry.ensure_visible(_window_handle(window))
+            _trace("窗口位置校验: %s" % result)
+            if result == "recentered":
+                # 事件回调里记的还是旧坐标，必须用窗口实际值覆盖
+                geometry.sync_from(window)
+        except Exception as exc:
+            _trace("窗口位置校验失败: %r" % (exc,))
+
+    window.events.shown += _verify_geometry
 
     # 窗口显示后才能拿到稳定的 HWND；事件回调在独立线程里执行。
     window.events.shown += _start_native_icons
@@ -2141,8 +2276,16 @@ def main():
 
 if __name__ == "__main__":
     # 计划任务走无窗口服务分支，不创建 WebView2，也不触发单实例锁。
-    if len(sys.argv) > 1 and sys.argv[1] == "--service":
+    # 三个入口一一对应三张计划任务卡片，任务运行时完全不依赖系统 Python。
+    _entry = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _entry == "--service":
         sys.exit(_service_main(sys.argv[2:]))
+    if _entry == "--qoder-service":
+        sys.exit(_side_service_main("qoder-service", _load_qoder,
+                                    sys.argv[2:]))
+    if _entry == "--trae-service":
+        sys.exit(_side_service_main("trae-service", _load_trae,
+                                    sys.argv[2:]))
 
     # edgechromium 后端会接管 stdout/stderr，异常信息经常整个丢失。
     # 自建一份文件日志，出问题时至少还有痕迹。路径见 _crash_path()：

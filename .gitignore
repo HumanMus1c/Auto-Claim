@@ -28,3 +28,12 @@ qoder_signin.log
 
 # Trae 多账号签到日志（包含账号 ID / 状态，不含 Token 原文）
 trae_signin.log
+
+# 本地「定时拉取 + 重新编译」计划任务（纯本地自动化，不随仓库分发）
+# 脚本、任务 XML、注册脚本与日志现在住在 %LOCALAPPDATA%\AutoClaimUpdater\，
+# 仓库只是被拉取/被构建的目标；下面仍显式忽略，防止旧副本或误拷回被提交。
+update-and-build.ps1
+update-and-build.log
+update-and-build.log.*.txt
+AutoClaimUpdateBuild.xml
+register-task.bat
