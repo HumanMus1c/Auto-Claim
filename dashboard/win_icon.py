@@ -83,7 +83,7 @@ ICON_LIGHT = "icon_light.ico"
 ICON_DARK = "icon_dark.ico"
 ICON_FALLBACK = "icon.ico"
 
-TRAY_TOOLTIP = "WorkBuddy 控制台"
+TRAY_TOOLTIP = "Auto-Claim 控制台"
 
 
 if _IS_WINDOWS:

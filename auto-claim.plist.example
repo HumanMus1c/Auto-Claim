@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  WorkBuddy 自动签到 · launchd 配置模板（macOS）
+  Auto-Claim · launchd 配置模板（macOS）
   ===============================================================
-  仓库：https://github.com/88lin/workbuddy-auto-signin （作者 88lin · MIT）
+  签到脚本与接口来自 https://github.com/88lin/workbuddy-auto-signin （作者 88lin · MIT）
   签到接口系逆向所得，服务端改一版就可能失效——修复都会推到上面这个仓库。
   顺手点个 ⭐ Star，等哪天连签莫名其妙断了，你能一秒把它找回来。
 
@@ -12,15 +12,15 @@
          which python3
     2. 复制到 LaunchAgents 目录（该目录首次使用时可能不存在，先建）：
          mkdir -p ~/Library/LaunchAgents
-         cp workbuddy-auto-signin.plist.example ~/Library/LaunchAgents/workbuddy-auto-signin.plist
+         cp auto-claim.plist.example ~/Library/LaunchAgents/auto-claim.plist
     3. 编辑该文件，把下面 ProgramArguments / WorkingDirectory 里的
-       /PATH/TO/workbuddy-auto-signin 改成你的真实脚本目录绝对路径；
+       /PATH/TO/Auto-Claim 改成你的真实脚本目录绝对路径；
        若第 1 步输出的不是 /usr/bin/python3，把 ProgramArguments 第一项也换掉。
     4. 加载（重复加载不会报错）：
-         launchctl bootout gui/$(id -u)/workbuddy-auto-signin 2>/dev/null
-         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/workbuddy-auto-signin.plist
+         launchctl bootout gui/$(id -u)/com.auto-claim.signin 2>/dev/null
+         launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/auto-claim.plist
     5. 卸载：
-         launchctl bootout gui/$(id -u)/workbuddy-auto-signin
+         launchctl bootout gui/$(id -u)/com.auto-claim.signin
 
   ⚠️ 别照抄 /usr/bin/python3！
      没装 Xcode Command Line Tools 时它只是个占位壳子：命令行里跑会弹安装框，
@@ -46,7 +46,7 @@
       UnicodeEncodeError。脚本兜得住（会改写 signin.log），但那样 .out 就是空的、
       人会一头雾水。显式钉死 UTF-8，从根上避免这一类。
     - 日志：stdout/stderr 由 launchd 重定向到下面两个文件。
-      查看：tail -20 /tmp/workbuddy-auto-signin.out
+      查看：tail -20 /tmp/auto-claim.out
       排错看 .err（Python 报错、权限拒绝都在那儿）。
       注意 auto 模式每轮都会追加一行（不像 Windows 的 silent-growth 会跳过
       空跑），launchd 也不做轮转；介意体积就定期清空，或把下面的路径改成你
@@ -56,17 +56,17 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>workbuddy-auto-signin</string>
+    <string>com.auto-claim.signin</string>
 
     <key>ProgramArguments</key>
     <array>
         <string>/usr/bin/python3</string>
-        <string>/PATH/TO/workbuddy-auto-signin/signin.py</string>
+        <string>/PATH/TO/Auto-Claim/signin.py</string>
         <string>auto</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/PATH/TO/workbuddy-auto-signin</string>
+    <string>/PATH/TO/Auto-Claim</string>
 
     <key>StartCalendarInterval</key>
     <array>
@@ -91,9 +91,9 @@
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/tmp/workbuddy-auto-signin.out</string>
+    <string>/tmp/auto-claim.out</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/workbuddy-auto-signin.err</string>
+    <string>/tmp/auto-claim.err</string>
 </dict>
 </plist>

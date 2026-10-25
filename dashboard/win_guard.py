@@ -40,7 +40,7 @@ import time
 from ctypes import wintypes
 
 MUTEX_NAME = r"Local\WorkBuddyDashboard.SingleInstance"
-WINDOW_TITLE = "WorkBuddy 控制台"
+WINDOW_TITLE = "Auto-Claim 控制台"
 
 ERROR_ACCESS_DENIED = 5
 ERROR_ALREADY_EXISTS = 183

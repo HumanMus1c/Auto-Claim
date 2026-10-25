@@ -2032,7 +2032,7 @@ def main():
            % (HERE, ASSETS,
               os.path.isfile(os.path.join(ASSETS, "index.html")), SIGNIN))
 
-    title = "WorkBuddy 控制台"
+    title = "Auto-Claim 控制台"
     guard_handle = None
     watchdog = None
     try:
@@ -2069,12 +2069,12 @@ def main():
             message = None
             warning = False
             if state == "hung":
-                message = ("WorkBuddy 控制台已在运行，但现有窗口无响应。\n\n"
+                message = ("Auto-Claim 控制台已在运行，但现有窗口无响应。\n\n"
                            "看门狗（默认开启）会自动结束它；也可以稍后重试，"
                            "或在任务管理器中结束 Auto-Claim-dashboard.exe。")
                 warning = True
             elif state == "missing":
-                message = ("WorkBuddy 控制台已在运行，但暂时找不到窗口。\n"
+                message = ("Auto-Claim 控制台已在运行，但暂时找不到窗口。\n"
                            "请稍等片刻后再试。")
             if message:
                 win_guard.show_message(message, title, warning=warning)

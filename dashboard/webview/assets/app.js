@@ -1,4 +1,4 @@
-/* WorkBuddy 控制台前端
+/* Auto-Claim 控制台前端
  *
  * 与 Python 后端通过 pywebview 的 JS bridge 通信：
  *   window.pywebview.api.<method>()  —— 调用
@@ -4239,7 +4239,7 @@ async function boot(api) {
     const t = await api.system_theme();
     updateSystemTheme(!!t.dark);
     if (t.accent) applyAccent(t.accent);
-    await api.native_title('WorkBuddy 控制台');
+    await api.native_title('Auto-Claim 控制台');
   } catch (e) {
     appendLog('主题同步失败（不影响使用）：' + (e && e.message || e), 'warn');
   }

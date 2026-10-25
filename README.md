@@ -372,7 +372,7 @@ powershell -ExecutionPolicy Bypass -File .\install-qoder-windows.ps1
 
 Trae 目前没有独立安装脚本：在控制台 **Trae** 页点 **安装 / 修复** 即可注册 `TraeDailyCheckin`。它固定执行 `pythonw.exe <trae_signin.py 的绝对路径> silent`，主签到时间取自 Trae 设置，默认 08:05，并自动补排 +2 / +5 / +9 / +13 小时四次。
 
-macOS 使用仓库中的 `workbuddy-auto-signin.plist.example`，改好绝对路径后用 `launchctl bootstrap` 加载。模板内含三种触发：每天 00:05、每 4 小时、登录时。
+macOS 使用仓库中的 `auto-claim.plist.example`，改好绝对路径后用 `launchctl bootstrap` 加载。模板内含三种触发：每天 00:05、每 4 小时、登录时。
 
 > 控制台的「安装 / 修复」与上面的安装脚本创建同名、同触发器的任务，两种方式可以互换；重复安装会更新同名任务。
 
@@ -497,7 +497,7 @@ Auto-Claim/
 ├── trae_signin.py                  # 移植自 TraeTools 的多账号签到 / 用量后端
 ├── install-windows.ps1             # 上游 WorkBuddy 计划任务安装
 ├── install-qoder-windows.ps1       # 上游 Qoder 计划任务安装
-├── workbuddy-auto-signin.plist.example
+├── auto-claim.plist.example
 ├── dashboard/                      # 本项目新增：Windows 控制台
 │   ├── win_service.py              # 计划任务管理
 │   ├── win_guard.py                # 单实例 + UI 看门狗

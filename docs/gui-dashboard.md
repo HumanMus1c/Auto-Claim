@@ -1,4 +1,4 @@
-# WorkBuddy 图形控制台
+# Auto-Claim 图形控制台
 
 > 给 `signin.py`、`qoder_signin.py` 和 `trae_signin.py` 配一个本地图形界面：单文件 exe、无终端窗口、与脚本同级分发。
 >
