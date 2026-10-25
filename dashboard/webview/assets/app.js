@@ -41,11 +41,17 @@ function esc(s) {
 /* ---------- 侧边栏页面切换 ---------- */
 
 const PAGE_KEY = 'wbPage';
+// 页面数据保质期：启动时后台预取、切回页面时若超过这个时间就静默重拉，
+// 避免预取过的页面一直停在旧数据上，又不会每次点侧边栏都联网。
+const PAGE_DATA_TTL = 60 * 1000;
 let CURRENT_PAGE = 'workbuddy';
 let QODER_LOADED = false;
 let QODER_LOADING = false;
+let QODER_AT = 0;
 let TRAE_LOADED = false;
 let TRAE_LOADING = false;
+let TRAE_AT = 0;
+let PAGE_PREFETCH_STARTED = false;
 let WB_STATUS = null;
 let WB_DOCTOR = null;
 let WB_ACCOUNT_PENDING = null;
@@ -77,18 +83,28 @@ function setPage(page) {
   else lazyKick();   // 切回监控页时，未加载区块按新的可见性重新判定
 }
 
-function ensureQoder() {
-  if (QODER_LOADED || QODER_LOADING) return;
-  refreshQoder(false);
-  refreshQoderService(true);
-  scheduleQoderServicePoll();
+function pageDataStale(at) {
+  return !at || (Date.now() - at) > PAGE_DATA_TTL;
 }
 
+/** 确保 Qoder 数据已加载；已加载但过期时静默补拉，不阻塞切页。 */
+function ensureQoder() {
+  if (QODER_LOADING) return Promise.resolve();
+  if (QODER_LOADED && !pageDataStale(QODER_AT)) return Promise.resolve();
+  const job = refreshQoder(QODER_LOADED);   // 已加载过就不要再刷一条“正在读取”
+  refreshQoderService(true);
+  scheduleQoderServicePoll();
+  return job;
+}
+
+/** 确保 Trae 数据已加载；已加载但过期时静默补拉，不阻塞切页。 */
 function ensureTrae() {
-  if (TRAE_LOADED || TRAE_LOADING) return;
-  refreshTrae(false);
+  if (TRAE_LOADING) return Promise.resolve();
+  if (TRAE_LOADED && !pageDataStale(TRAE_AT)) return Promise.resolve();
+  const job = refreshTrae(TRAE_LOADED);
   refreshTraeService(true);
   scheduleTraeServicePoll();
+  return job;
 }
 
 /* ---------- 主题 ---------- */
@@ -1799,7 +1815,7 @@ function renderQoderAccount(status, doctor) {
   if (!status && !doctor) {
     traeEmpty(box, QODER_DATA && QODER_DATA.error
       ? 'Qoder 账号不可用：' + QODER_DATA.error
-      : '打开此页或点击「刷新监控」后显示 Qoder CN 账号');
+      : '尚未读取到 Qoder CN 账号，可点击「刷新监控」重试');
     if (at) at.textContent = '尚未刷新';
     return;
   }
@@ -2156,14 +2172,24 @@ function refreshQoder(silent) {
   QODER_LOADING = true;
   const btns = [$('btnQoderRefresh'), $('btnQoderAccountRefresh')];
   btns.forEach((b) => { if (b) b.disabled = true; });
+  if (!QODER_DATA) {
+    const hint = $('qoderSideHint');
+    if (hint) {
+      hint.textContent = '检测中…';
+      hint.title = '正在检测 Qoder CN 登录态并同步活动';
+    }
+    qoderSetDot('busy');
+  }
   if (!silent) appendQoderLog('正在读取 Qoder 账号、活动与日志…', 'meta');
   return call('qoder_monitor')
     .then((data) => {
       QODER_LOADED = true;
+      QODER_AT = Date.now();
       renderQoder(data);
     })
     .catch((e) => {
       QODER_LOADED = true;
+      QODER_AT = Date.now();
       renderQoder({ ok: false, error: String(e) });
       appendQoderLog('刷新 Qoder 监控失败：' + e, 'err');
     })
@@ -3319,6 +3345,14 @@ function refreshTrae(silent) {
   TRAE_LOADING = true;
   const btn = $('btnTraeRefresh');
   if (btn) btn.disabled = true;
+  if (!TRAE_DATA) {
+    const hint = $('traeSideHint');
+    if (hint) {
+      hint.textContent = '检测中…';
+      hint.title = '正在检测 Trae 本机登录态并同步账号';
+    }
+    traeSetDot('busy');
+  }
   if (!silent) appendTraeLog('正在读取 Trae 账号、签到历史、用量与日志…', 'meta');
   return call('trae_monitor')
     .then((data) => {
@@ -3330,10 +3364,12 @@ function refreshTrae(silent) {
         return;
       }
       TRAE_LOADED = true;
+      TRAE_AT = Date.now();
       renderTrae(data);
     })
     .catch((e) => {
       TRAE_LOADED = true;
+      TRAE_AT = Date.now();
       renderTrae({ ok: false, error: String(e), log: null });
       appendTraeLog('刷新 Trae 监控失败：' + e, 'err');
     })
@@ -4050,6 +4086,43 @@ function whenVisible(key, el, run) {
   return section;
 }
 
+/* ---------- Qoder / Trae 启动预取 ---------- */
+
+/* WorkBuddy 首屏优先：Qoder / Trae 的账号检测与监控数据放到浏览器空闲时
+ * 异步拉取，并按页错开，避免和首屏 status / doctor 抢网络与 UI 线程。
+ * 这样用户第一次切到侧边栏页面时数据已经就绪，不需要再等一轮查询。
+ */
+function scheduleIntegrationPrefetch(info) {
+  if (PAGE_PREFETCH_STARTED) return;
+  PAGE_PREFETCH_STARTED = true;
+
+  const jobs = [];
+  if (info && info.qoder_exists) jobs.push({ key: 'Qoder', run: ensureQoder });
+  if (info && info.trae_exists) jobs.push({ key: 'Trae', run: ensureTrae });
+  if (!jobs.length) return;
+
+  let index = 0;
+  const runNext = () => {
+    if (index >= jobs.length) return;
+    const job = jobs[index++];
+    try {
+      job.run();
+    } catch (e) {
+      appendLog('自动加载 ' + job.key + ' 监控失败：' + e, 'err');
+    }
+    if (index < jobs.length) setTimeout(runNext, 1000);
+  };
+
+  const idle = (fn) => {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(fn, { timeout: 3000 });
+    } else {
+      setTimeout(fn, 1200);      // 旧版 WebView2 没有 requestIdleCallback
+    }
+  };
+  idle(runNext);
+}
+
 /* ---------- 启动 ---------- */
 
 async function boot(api) {
@@ -4134,6 +4207,11 @@ async function boot(api) {
   });
 
   setPage(savedPage());
+
+  // Qoder / Trae 不再等用户切页才开始检测：启动后按空闲时间自动预取。
+  // 缺少对应脚本时跳过，避免把“文件不存在”误报成连接失败。
+  scheduleIntegrationPrefetch(info);
+
   if (!info.qoder_exists) {
     const hint = $('qoderSideHint');
     if (hint) hint.textContent = '缺少 qoder_signin.py';
@@ -4150,7 +4228,8 @@ async function boot(api) {
   }
 
   // 缓存只是"先有个数看"，真实数据以各区块自己的查询为准（见上）。
-  // 只有 Qoder 页不在启动时联网：切到该页或点刷新才查询。
+  // Qoder / Trae 由 scheduleIntegrationPrefetch() 在空闲时自动预取；
+  // 切回页面时若数据超过 TTL 再静默刷新。
   if (!info.signin_exists) {
     setBadge('缺少 signin.py', 'err');
   }

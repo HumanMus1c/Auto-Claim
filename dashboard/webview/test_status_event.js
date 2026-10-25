@@ -256,6 +256,39 @@ function testSideStatusUsesUnifiedWording() {
   assert.strictEqual(h.el('traeDot').className, 'side-dot ok');
 }
 
+function testStartupPrefetchQueuesBothPages() {
+  const h = boot();
+  const calls = [];
+  h.context.ensureQoder = () => calls.push('qoder');
+  h.context.ensureTrae = () => calls.push('trae');
+  h.window.requestIdleCallback = (fn) => fn();
+  h.context.setTimeout = (fn) => fn();       // 第二个页面按错开延时入队
+
+  vm.runInContext(
+    'scheduleIntegrationPrefetch({ qoder_exists: true, trae_exists: true })',
+    h.context);
+  assert.deepStrictEqual(calls, ['qoder', 'trae']);
+}
+
+function testEnsureRefreshesStalePageData() {
+  const h = boot();
+  const calls = [];
+  h.context.refreshQoder = () => { calls.push('monitor'); return Promise.resolve(); };
+  h.context.refreshQoderService = () => { calls.push('service'); return Promise.resolve(); };
+  h.context.scheduleQoderServicePoll = () => {};
+  // QODER_* 是 let 绑定，必须通过 vm 赋值，不能挂到 sandbox 对象上
+  vm.runInContext(
+    'QODER_LOADED = true; QODER_LOADING = false; QODER_AT = Date.now();',
+    h.context);
+
+  vm.runInContext('ensureQoder()', h.context);
+  assert.deepStrictEqual(calls, [], '新数据不应在切页时重复查询');
+
+  vm.runInContext('QODER_AT = Date.now() - 61 * 1000;', h.context);
+  vm.runInContext('ensureQoder()', h.context);
+  assert.deepStrictEqual(calls, ['monitor', 'service'], '过期数据应静默补拉');
+}
+
 function testPlanTaskHeadingAndTraeOrder() {
   const html = fs.readFileSync(INDEX, 'utf8');
   const headings = Array.from(html.matchAll(/<h2>([^<]+)<\/h2>/g), (m) => m[1]);
@@ -283,6 +316,8 @@ const tests = [
   ['手动主题不被系统覆盖', testThemeKeepsManualChoice],
   ['账号区域缺省为国内、SG 为国际', testAccountRegionDefaults],
   ['侧边栏状态统一为已签到/未签到、已领取/未领取', testSideStatusUsesUnifiedWording],
+  ['启动后自动预取 Qoder 与 Trae', testStartupPrefetchQueuesBothPages],
+  ['页面数据过期后切页静默补拉', testEnsureRefreshesStalePageData],
   ['三个计划任务标题一致且 Trae 卡片位于账号下方', testPlanTaskHeadingAndTraeOrder],
 ];
 
