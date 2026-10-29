@@ -370,6 +370,27 @@ Windows Qoder：
 powershell -ExecutionPolicy Bypass -File .\install-qoder-windows.ps1
 ```
 
+macOS Qoder（launchd）：
+
+```bash
+bash install-qoder-macos.sh
+```
+
+只创建一个 launchd 任务（`qoder-daily-credits`），不碰 WorkBuddy 的两个任务：
+
+| 任务 | 触发 | 干什么 |
+|---|---|---|
+| `qoder-daily-credits` | 每天 10:05，另加 11:05 / 15:05 / 19:05 / 23:05 | 查询并领取，每轮一行 JSON 写入 `~/Library/Logs/QoderDailyCredits/out.log` |
+
+安装脚本会先跑一次 `doctor` 自检（不联网、不领取），通过后才注册；注册失败会用备份自动回滚，不会把已有任务弄丢。自检会忽略终端里的临时 `QODER_TOKEN`，确认桌面登录态可用；自定义的 `QODER_EXE` / `QODER_AUTH_DIR` 会按安装时的当前目录展开为绝对路径，用于自检并保存到后台任务。
+
+卸载：Windows 用 `Unregister-ScheduledTask -TaskName "QoderDailyCredits" -Confirm:$false`，macOS 用 `bash uninstall-qoder-macos.sh`。
+
+> [!NOTE]
+> macOS 上首次读取登录态时，系统可能弹出钥匙串授权框（`Qoder CN App Safe Storage`）。选「始终允许」，否则后台任务会卡在等待授权。
+>
+> Python 解释器优先取 `/opt/homebrew/bin/python3` 或 `/usr/local/bin/python3`（Intel 机），找不到才用 `PATH` 里的；`/usr/bin/python3` 在没有 Xcode Command Line Tools 时只是占位壳，装了 launchd 任务会静默失败。要强制指定可用 `QODER_PYTHON=/path/to/python3 bash install-qoder-macos.sh`。
+
 Trae 目前没有独立安装脚本：在控制台 **Trae** 页点 **安装 / 修复** 即可注册 `TraeDailyCheckin`。它固定执行 `pythonw.exe <trae_signin.py 的绝对路径> silent`，主签到时间取自 Trae 设置，默认 08:05，并自动补排 +2 / +5 / +9 / +13 小时四次。
 
 macOS 使用仓库中的 `auto-claim.plist.example`，改好绝对路径后用 `launchctl bootstrap` 加载。模板内含三种触发：每天 00:05、每 4 小时、登录时。
@@ -407,10 +428,11 @@ Windows 上预算必须小于对应计划任务的 `ExecutionTimeLimit`（签到
 
 | 变量 | 作用 |
 |---|---|
-| `QODER_AUTH_DIR` | 指定 Qoder CN 数据目录；默认扫描 `%APPDATA%\com.qodercn.app*` |
-| `QODER_TOKEN` | 手动提供 access token（非 Windows 或调试用，优先于本地登录态） |
+| `QODER_AUTH_DIR` | 指定 Qoder CN 数据目录；Windows 默认扫描 `%APPDATA%\com.qodercn.app*`，macOS 默认扫描 `~/Library/Application Support/com.qodercn.app*` |
+| `QODER_TOKEN` | 手动提供 access token（Linux 或调试用，优先于本地登录态） |
 | `QODER_BASE_URL` | 覆盖 API 端点，默认 `https://openapi.qoder.com.cn` |
-| `QODER_UMID_EXE` | 指定客户端自带的 `runtime-info.exe` |
+| `QODER_EXE` | macOS：指定 Qoder CN 可执行文件（默认 `/Applications/Qoder CN.app`） |
+| `QODER_UMID_EXE` | 指定客户端自带的 `runtime-info.exe`（Windows；自动探测失败时） |
 | `QODER_SIGNIN_LOG` | Qoder 日志路径（默认 `qoder_signin.log`） |
 | `QODER_SIGNIN_LOG_EMPTY` | 设为 `1` 时空跑也写日志 |
 
