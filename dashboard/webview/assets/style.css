@@ -21,6 +21,11 @@
   --warn: #a87400;
   --err: #be2828;
 
+  /* 状态点专用色：--warn 是给文字用的深琥珀（保证小字号对比度），
+     直接拿来画小圆点在浅色背景上会发暗、像褐色。这里单独给一档
+     亮黄色，和侧边栏图例的「黄」严格对应。 */
+  --dot-warn: #ffc400;
+
   --r-card: 10px;
   --r-btn: 8px;
   --shadow: 0 1px 2px rgba(0, 0, 0, .05), 0 0 1px rgba(0, 0, 0, .12);
@@ -43,6 +48,7 @@ html[data-theme="dark"] {
   --ok: #5cc47e;
   --warn: #d6a84a;
   --err: #d65c5c;
+  --dot-warn: #ffd75e;
 
   --shadow: 0 1px 2px rgba(0, 0, 0, .4);
 }
@@ -314,17 +320,49 @@ body {
 }
 
 .side-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   flex: 0 0 auto;
   margin-left: auto;
   border-radius: 50%;
   background: var(--border);
 }
 .side-dot.ok { background: var(--ok); }
-.side-dot.warn { background: var(--warn); }
+.side-dot.warn {
+  background: var(--dot-warn);
+  /* 亮黄在白色侧边栏上对比度低，内描一圈淡边让 8px 圆点仍有轮廓 */
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12);
+}
 .side-dot.err { background: var(--err); }
-.side-dot.busy { background: var(--warn); animation: pulse 1.1s ease-in-out infinite; }
+.side-dot.busy { background: var(--dot-warn); animation: pulse 1.1s ease-in-out infinite; }
+
+/* 未安装：空心灰点。实心灰点和「未检测」分不开，而「未安装」必须一眼
+   区别于「连上了」——用内描边画出空心，浅色/深色主题都不会看错。 */
+.side-dot.off {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-dim);
+}
+
+/* 侧边栏图例：两列排布，字号比正文再小一档 */
+.side-legend {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 8px;
+  padding: 2px 9px 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.side-legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+.side-legend .side-dot {
+  width: 7px;
+  height: 7px;
+  margin-left: 0;
+}
 
 .side-foot {
   margin-top: auto;
@@ -525,6 +563,13 @@ main {
 }
 
 .svc-alert-hint { color: var(--text); }
+.svc-alert-extra { color: var(--text-dim); font-size: 11.5px; }
+.svc-alert-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
 
 .svc-alert details {
   margin-top: 2px;

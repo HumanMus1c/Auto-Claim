@@ -68,6 +68,10 @@ def pre_checks():
     if run("计划任务失败提示回归测试", ["node", js_alert]) != 0:
         failed.append("计划任务失败提示回归测试未通过")
 
+    js_dots = os.path.join(HERE, "test_side_dots.js")
+    if run("侧边栏状态点回归测试", ["node", js_dots]) != 0:
+        failed.append("侧边栏状态点回归测试未通过")
+
     if run("重复代码检查", [PY, os.path.join(HERE, "check_dup.py")]) != 0:
         failed.append("存在重复代码块")
 
@@ -78,7 +82,8 @@ def pre_checks():
                         "test_locate_signin", "test_win_guard",
                         "test_win_service", "test_win_icon",
                         "test_win_geometry", "test_trae_backend",
-                        "test_data_dir"]) != 0:
+                        "test_data_dir", "test_service_recovery",
+                        "test_schedule_jitter"]) != 0:
         failed.append("单元测试未通过")
 
     return failed
@@ -113,7 +118,7 @@ def post_check():
         (SPEC, SPEC),
     ]
     for name in ("win_theme.py", "win_title.py", "win_guard.py",
-                 "win_service.py", "win_icon.py"):
+                 "win_service.py", "schedule_jitter.py", "win_icon.py"):
         paths.append((os.path.join(DASHBOARD, name), "dashboard/" + name))
     for path, label in paths:
         if os.path.isfile(path) and os.path.getmtime(path) > exe_mtime + 1:

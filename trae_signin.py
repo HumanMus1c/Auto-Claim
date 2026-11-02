@@ -2643,6 +2643,26 @@ def run(action, account_id=None, days=None):
     return 1
 
 
+def _reshuffle_schedule():
+    """计划任务跑完后换一组触发时刻。
+
+    控制台 exe 的 ``--trae-service`` 入口自己会重排；这个钩子覆盖的是
+    「任务直接指向 pythonw trae_signin.py silent」的机器——那条路径不经过
+    控制台，不在这里补，就永远只有安装时那一次的随机。
+
+    全程吞异常：换时间是顺带的，不能让它把签到结果改成失败。
+    """
+    try:
+        dashboard = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                 "dashboard")
+        if os.path.isdir(dashboard) and dashboard not in sys.path:
+            sys.path.insert(0, dashboard)
+        import win_service
+        win_service.apply_jitter_after_run("trae")
+    except Exception:
+        pass
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     action = argv[0] if argv else "auto"
@@ -2653,7 +2673,7 @@ def main(argv=None):
         except (IndexError, ValueError):
             days = None
     try:
-        return run(action, days=days)
+        code = run(action, days=days)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
@@ -2662,6 +2682,9 @@ def main(argv=None):
                    "needs_attention": True}
         emit(payload, action)
         return 2
+    if action == "silent":
+        _reshuffle_schedule()
+    return code
 
 
 if __name__ == "__main__":

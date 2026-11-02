@@ -179,6 +179,339 @@ def _locate_trae():
 TRAE = _locate_trae()
 
 
+# ---------- 桌面端安装 / 运行探测 ----------
+#
+# 侧边栏的状态点回答的是「这台机器现在能不能连上这个模块」。只看登录态
+# 不够：Qoder 卸载后本地可能还留着能解密的凭据，doctor 仍返回 OK，于是
+# 一个已经卸载的模块被画成绿点「已连接」。这里补一层本机探测，把
+# 「已安装 / 正在运行」一起交给前端，状态点才能说实话。
+#
+# installed / running 为 None 表示无法判断（非 Windows 或探测异常）；
+# 前端遇到 None 会退回只看登录态，不把「未知」当成「未安装」。
+
+_DESKTOP_TTL = 30.0
+_DESKTOP_CACHE = {}
+_DESKTOP_LOCK = threading.Lock()
+
+# 进程列表缓存：bootstrap 一次要查三个模块，逐次枚举进程没有必要
+_PROC_TTL = 5.0
+_PROC_CACHE = (0.0, set())
+
+# 卸载表缓存：扫注册表比枚举进程慢一个量级
+_REG_TTL = 60.0
+_REG_CACHE = (0.0, [])
+
+_DESKTOP_HINTS = {
+    "workbuddy": {
+        "keywords": ("workbuddy",),
+        "dirs": (r"%ProgramFiles%\WorkBuddy", r"%ProgramFiles(x86)%\WorkBuddy"),
+        "launcher": None,
+    },
+    "qoder": {
+        "keywords": ("qoder",),
+        "dirs": (r"%LOCALAPPDATA%\Programs\Qoder CN",
+                 r"%ProgramFiles%\Qoder CN",
+                 r"%ProgramFiles(x86)%\Qoder CN"),
+        # 自定义安装目录（例如 C:\Programs\Qoder CN）只有启动器记着
+        "launcher": r"%LOCALAPPDATA%\Qoder CN\Qoder CN Launcher\state.ini",
+    },
+    "trae": {
+        "keywords": ("trae",),
+        "dirs": (r"%LOCALAPPDATA%\Programs\Trae CN",
+                 r"%LOCALAPPDATA%\Programs\Trae",
+                 r"%ProgramFiles%\Trae CN"),
+        "launcher": None,
+    },
+}
+
+
+# 卸载表根键：以字符串保存，函数里再 getattr(winreg, name)，
+# 避免在模块顶层 import winreg（非 Windows 没有这个模块）
+_UNINSTALL_ROOTS = (
+    ("HKEY_CURRENT_USER",
+     r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ("HKEY_LOCAL_MACHINE",
+     r"Software\Microsoft\Windows\CurrentVersion\Uninstall"),
+    ("HKEY_LOCAL_MACHINE",
+     r"Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+)
+
+
+def _process_images():
+    """当前进程的 exe 文件名集合（小写）。非 Windows / 读取失败返回空集合。"""
+    global _PROC_CACHE
+    now = time.time()
+    if _PROC_CACHE[0] and now - _PROC_CACHE[0] < _PROC_TTL:
+        return _PROC_CACHE[1]
+
+    names = set()
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            psapi = ctypes.WinDLL("psapi", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [
+                wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.QueryFullProcessImageNameW.argtypes = [
+                wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                ctypes.POINTER(wintypes.DWORD)]
+            kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+            block = (wintypes.DWORD * 4096)()
+            used = wintypes.DWORD()
+            if psapi.EnumProcesses(ctypes.byref(block), ctypes.sizeof(block),
+                                   ctypes.byref(used)):
+                total = used.value // ctypes.sizeof(wintypes.DWORD)
+                for index in range(total):
+                    pid = block[index]
+                    if not pid:
+                        continue
+                    handle = kernel32.OpenProcess(0x1000, False, pid)
+                    if not handle:
+                        continue
+                    try:
+                        buf = ctypes.create_unicode_buffer(1024)
+                        size = wintypes.DWORD(len(buf))
+                        if kernel32.QueryFullProcessImageNameW(
+                                handle, 0, buf, ctypes.byref(size)):
+                            names.add(os.path.basename(buf.value).lower())
+                    finally:
+                        kernel32.CloseHandle(handle)
+        except Exception as exc:
+            _trace("进程探测失败: %r" % (exc,))
+
+    _PROC_CACHE = (now, names)
+    return names
+
+
+def _reg_value(winreg, item, field):
+    """读一个注册表值；不存在时返回空串。"""
+    try:
+        return str(winreg.QueryValueEx(item, field)[0])
+    except OSError:
+        return ""
+
+
+def _read_uninstall_entry(winreg, key, name):
+    """读一个卸载条目，返回 (显示名, 安装目录, 图标路径)。"""
+    row = None
+    values = ["", "", ""]
+    try:
+        with winreg.OpenKey(key, name) as item:
+            values = [_reg_value(winreg, item, field)
+                      for field in ("DisplayName", "InstallLocation",
+                                    "DisplayIcon")]
+        if values[0]:
+            row = (values[0], values[1], values[2])
+    except OSError as exc:
+        _trace("卸载条目不可读(%s): %r" % (name, exc))
+    return row
+
+
+def _subkey_names(winreg, key):
+    """列出一个注册表键的子键；中途失败时返回已读到的部分。"""
+    try:
+        total = winreg.QueryInfoKey(key)[0]
+    except OSError:
+        return []
+
+    names = []
+    index = 0
+    while index < total:
+        try:
+            names.append(winreg.EnumKey(key, index))
+        except OSError as exc:
+            _trace("卸载表枚举中断: %r" % (exc,))
+            break
+        index += 1
+    return names
+
+
+def _read_uninstall_key(winreg, hive_name, sub):
+    """读取一个卸载表根键下的全部条目。"""
+    hive = getattr(winreg, hive_name, None)
+    rows = []
+    key = None
+    if hive:
+        try:
+            key = winreg.OpenKey(hive, sub)
+        except OSError as exc:
+            _trace("卸载表根键不可读(%s): %r" % (sub, exc))
+    if key:
+        try:
+            for name in _subkey_names(winreg, key):
+                row = _read_uninstall_entry(winreg, key, name)
+                if row:
+                    rows.append(row)
+        finally:
+            winreg.CloseKey(key)
+    return rows
+
+
+def _registry_installs():
+    """卸载注册表里的 (显示名, 安装目录, 图标路径)；读取失败返回 []。"""
+    global _REG_CACHE
+    now = time.time()
+    if _REG_CACHE[0] and now - _REG_CACHE[0] < _REG_TTL:
+        return _REG_CACHE[1]
+
+    rows = []
+    if os.name == "nt":
+        try:
+            import winreg
+
+            for hive_name, sub in _UNINSTALL_ROOTS:
+                rows.extend(_read_uninstall_key(winreg, hive_name, sub))
+        except Exception as exc:
+            _trace("卸载表读取失败: %r" % (exc,))
+
+    _REG_CACHE = (now, rows)
+    return rows
+
+
+def _first_exe(folder, keywords):
+    """目录里名字含关键字的 exe；只扫一层，避免遍历整棵安装目录。
+
+    「Uninstall X.exe」也含关键字，必须排除；恰好等于关键字的
+    （WorkBuddy.exe）优先级最高，避免把卸载器当成主程序。
+    """
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+
+    best = None
+    best_score = 0
+    for name in names:
+        low = name.lower()
+        if not low.endswith(".exe") or low.startswith("uninstall"):
+            continue
+        if not any(word in low for word in keywords):
+            continue
+        score = 2 if low[:-4] in keywords else 1
+        if score > best_score:
+            best = os.path.join(folder, name)
+            best_score = score
+    return best
+
+
+def _install_from_launcher(path, keywords):
+    """Qoder 启动器的 state.ini 记着真实的安装目录（可以是自定义路径）。"""
+    text = ""
+    try:
+        with io.open(path, encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        pass
+
+    folder = ""
+    exe = ""
+    for line in text.splitlines():
+        item = line.strip()
+        low = item.lower()
+        if low.startswith("installdir="):
+            folder = item.split("=", 1)[1].strip()
+        elif low.startswith("appexecutable="):
+            exe = item.split("=", 1)[1].strip()
+    if not folder:
+        return None
+
+    target = os.path.join(folder, exe) if exe else ""
+    if target and os.path.isfile(target):
+        return target
+    return _first_exe(folder, keywords)
+
+
+def _registry_folder(value):
+    """把 InstallLocation / DisplayIcon 统一成目录。"""
+    text = (value or "").strip().strip('"')
+    if not text:
+        return ""
+    head = text.split(",")[0].strip().strip('"')
+    if head.lower().endswith(".exe"):
+        return os.path.dirname(head)
+    return head
+
+
+def _install_candidates(kind):
+    """按优先级给出候选安装目录：(目录, 来源)。"""
+    spec = _DESKTOP_HINTS[kind]
+    for pattern in spec["dirs"]:
+        yield os.path.expandvars(pattern), "目录"
+
+    launcher = spec["launcher"]
+    if launcher:
+        exe = _install_from_launcher(os.path.expandvars(launcher),
+                                     spec["keywords"])
+        if exe:
+            yield os.path.dirname(exe), "启动器"
+
+    for display, location, icon in _registry_installs():
+        if not any(word in display.lower() for word in spec["keywords"]):
+            continue
+        for raw in (location, icon):
+            folder = _registry_folder(raw)
+            if folder:
+                yield folder, "注册表"
+
+
+def _find_install(kind):
+    """返回 (exe 路径, 探测来源)；找不到返回 (None, None)。"""
+    keywords = _DESKTOP_HINTS[kind]["keywords"]
+    for folder, source in _install_candidates(kind):
+        exe = _first_exe(folder, keywords)
+        if exe:
+            return exe, source
+    return None, None
+
+
+def _desktop_cached(kind, now):
+    with _DESKTOP_LOCK:
+        hit = _DESKTOP_CACHE.get(kind)
+    if hit and now - hit[0] < _DESKTOP_TTL:
+        return dict(hit[1])
+    return None
+
+
+def _desktop_store(kind, now, state):
+    with _DESKTOP_LOCK:
+        _DESKTOP_CACHE[kind] = (now, dict(state))
+
+
+def _desktop_state(kind):
+    """探测桌面端：{"installed", "running", "path", "source"}。"""
+    if kind not in _DESKTOP_HINTS:
+        return {"installed": None, "running": None, "path": None,
+                "source": None}
+
+    now = time.time()
+    hit = _desktop_cached(kind, now)
+    if hit is not None:
+        return hit
+
+    state = {"installed": None, "running": None, "path": None, "source": None}
+    if os.name == "nt":
+        try:
+            names = _process_images()
+            state["running"] = any(
+                any(word in name for word in _DESKTOP_HINTS[kind]["keywords"])
+                for name in names)
+        except Exception as exc:
+            _trace("运行状态探测失败(%s): %r" % (kind, exc))
+        try:
+            exe, source = _find_install(kind)
+            state.update(installed=bool(exe), path=exe, source=source)
+        except Exception as exc:
+            _trace("安装状态探测失败(%s): %r" % (kind, exc))
+
+    _desktop_store(kind, now, state)
+    return state
+
+
 def _signin_log_path():
     """signin.py 的默认日志位置；环境变量优先，规则与 emit() 一致。"""
     override = os.environ.get("WORKBUDDY_SIGNIN_LOG")
@@ -1177,6 +1510,10 @@ class Api:
         self._watchdog = None
         self._lock = threading.Lock()
         self._busy = False
+        # 计划任务失败提示的恢复流程：同一时刻只允许一个在跑，
+        # 否则两次「重新导入并重试」会同时改同一份记录。
+        self._alert_lock = threading.Lock()
+        self._alert_retry = None
         # Qoder 领取与 WorkBuddy 命令互不阻塞；各自维护忙碌状态。
         self._qoder_busy = False
         self._qoder_state_lock = threading.Lock()
@@ -1225,6 +1562,10 @@ class Api:
             "trae": TRAE,
             "trae_exists": os.path.exists(TRAE),
             "trae_searched": list(TRAE_SEARCHED),
+            # 本机桌面端安装 / 运行状态：侧边栏状态点用它区分
+            # 「未安装」「已安装未登录」「已连接」，而不是只看登录态
+            "desktop": {kind: _desktop_state(kind)
+                        for kind in ("workbuddy", "qoder", "trae")},
             "readonly": list(READONLY_ACTIONS),
             "actions": [
                 {"key": k, "label": v["label"], "write": v["write"],
@@ -1234,6 +1575,7 @@ class Api:
             "history": _read_local_log(),
             "cached": _load_store(),
             "growth": _load_growth_store(),
+            "alerts": _read_service_alerts(),
         }
 
     def attach(self, window_id):
@@ -1570,6 +1912,69 @@ class Api:
         _append_log("脚本服务 %s: %s" % (action, text))
         return result
 
+    # ---------- 计划任务失败提示与恢复 ----------
+
+    def service_alerts(self):
+        """读取计划任务的失败记录，供对应模块展示。"""
+        return {"ok": True, "items": _read_service_alerts()}
+
+    def service_alert_ack(self, kind):
+        """「知道了」：只清掉这一个模块的提示，不影响其它模块。"""
+        try:
+            import win_service
+            removed = win_service.clear_alert(_diag_dir(), kind)
+            return {"ok": True, "removed": removed}
+        except Exception as exc:
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+
+    def service_alert_retry(self, kind):
+        """「重新导入并重试」：后台执行，结果通过 service_alert 事件推送。"""
+        if kind not in SERVICE_TASK_NAME:
+            return {"ok": False, "error": "未知的计划任务类型：%s" % kind}
+        with self._alert_lock:
+            if self._alert_retry:
+                return {"ok": False, "error": "上一次恢复还在执行，请稍候"}
+            self._alert_retry = kind
+        threading.Thread(target=self._service_alert_worker,
+                         args=(kind,), daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def _service_alert_worker(self, kind):
+        """重新导入本机登录态 → 跑一次自动签到 → 回写记录。"""
+        event = {"kind": kind, "stage": "done", "ok": False, "report": ""}
+        try:
+            ok, report = _reimport_local(kind)
+            self._push("service_alert", {"kind": kind, "stage": "reimport",
+                                         "ok": bool(ok), "report": report})
+            code, retry_report = _retry_service_action(kind, "auto", 0.0)
+            recovered = code == 0
+            self._update_alert(kind, reimport_ok=bool(ok),
+                               reimport_report=report,
+                               retry_exit=code,
+                               retry_report=retry_report,
+                               recovered=recovered, stage="manual")
+            event.update(ok=recovered, report=retry_report)
+        except Exception as exc:
+            event["report"] = "%s: %s" % (type(exc).__name__, exc)
+        finally:
+            with self._alert_lock:
+                self._alert_retry = None
+        self._push("service_alert", event)
+
+    @staticmethod
+    def _update_alert(kind, **fields):
+        """在已有记录上覆盖字段；没有记录就新建一条。"""
+        try:
+            import win_service
+            items = {item.get("kind"): item
+                     for item in win_service.read_alerts(_diag_dir())}
+            record = dict(items.get(kind) or {"kind": kind})
+            record.update(fields)
+            win_service.write_alert(_diag_dir(), record)
+        except Exception as exc:
+            _trace("回写失败记录失败: %r" % (exc,))
+
     # ---------- Qoder CN 监控 ----------
 
     @staticmethod
@@ -1601,7 +2006,8 @@ class Api:
         这个接口只读：status 查询活动，doctor 离线检查登录态，不会领取。
         网络请求与 signin 的锁完全独立，不会阻塞 WorkBuddy 面板。
         """
-        result = {"path": QODER, "log": _qoder_log_snapshot()}
+        result = {"path": QODER, "log": _qoder_log_snapshot(),
+                  "desktop": _desktop_state("qoder")}
         if not os.path.isfile(QODER):
             extra = dict(ok=False, error="未找到 qoder_signin.py",
                          searched=list(QODER_SEARCHED))
@@ -1776,7 +2182,8 @@ class Api:
 
     def trae_monitor(self):
         """读取 Trae 账号、签到历史、用量与日志（不联网、不签到）。"""
-        result = {"path": TRAE, "log": _trae_log_snapshot()}
+        result = {"path": TRAE, "log": _trae_log_snapshot(),
+                  "desktop": _desktop_state("trae")}
         if not os.path.isfile(TRAE):
             result.update(ok=False, error="未找到 trae_signin.py",
                           searched=list(TRAE_SEARCHED))
@@ -1785,7 +2192,8 @@ class Api:
             busy = self._trae_busy
         if busy:
             cached = dict(self._trae_last or {})
-            cached.update(ok=True, busy=True, log=result["log"], path=TRAE)
+            cached.update(ok=True, busy=True, log=result["log"], path=TRAE,
+                          desktop=result["desktop"])
             return cached
 
         try:
@@ -1959,10 +2367,11 @@ class Api:
                                    .get("auto_time") or "08:05")
                     except Exception:
                         primary = "08:05"
-                    times = win_service.trae_trigger_times(primary)
+                    base_times = win_service.trae_trigger_times(primary, jitter=False)
                     runner, prefix = _service_runner("trae")
                     result = win_service.install_trae(
-                        TRAE, times=times, runner=runner, runner_args=prefix)
+                        TRAE, base_times=base_times, runner=runner,
+                        runner_args=prefix)
             else:
                 result = win_service.trae_action(action)
         except Exception as exc:
@@ -2019,11 +2428,30 @@ class Api:
             pass  # 窗口已关闭
 
 
+def _reshuffle_schedule(kind):
+    """签到跑完后换一组触发时刻。
+
+    放在 _handle_service_failure 之后：失败重试期间任务还在跑，这时重排会
+    和正在执行的动作抢同一份任务定义。失败也要重排——否则每天在同一分钟
+    失败，日志会一模一样，看不出这是「同一个时刻的老问题」而不是新增故障。
+
+    全程吞异常：换时间只是顺带的优化，不能让它把签到结果改成失败。
+    """
+    try:
+        import win_service
+        win_service.apply_jitter_after_run(kind, _diag_dir())
+    except Exception as exc:
+        _append_log("[jitter] %s 重排异常：%s" % (kind, exc))
+
+
 def _service_main(argv):
     """计划任务入口：``--service silent`` / ``silent-poll``。
 
     由 win_service 注册的计划任务调用。直接复用 Api._invoke()，不创建窗口，
     也不需要 pywebview；silent 类命令的结果由 signin.emit() 写进 signin.log。
+
+    失败时不再只是「静默退出」：把原文写进失败记录、拉起控制台、重新导入
+    本机登录态并限时重试一次（见 _handle_service_failure）。
     """
     action = argv[0] if argv else ""
     allowed = ("silent", "silent-poll", "silent-growth")
@@ -2032,6 +2460,8 @@ def _service_main(argv):
                     % (action, " / ".join(allowed)))
         return 2
 
+    started = time.monotonic()
+    stdout = ""
     try:
         code, stdout, stderr = Api._invoke(action)
     except Exception as exc:
@@ -2043,12 +2473,18 @@ def _service_main(argv):
                 fh.write("[service %s] %s\n" % (action, detail))
         except Exception:
             pass
-        return 1
+        code, stderr = 1, ""
+        stdout = json.dumps({"result": "ERROR", "report": detail})
 
     # silent 正常时 stdout 为空；异常或加载失败才会有内容，落盘便于事后追溯。
     for line in (stderr or "").splitlines() + (stdout or "").splitlines():
         _append_log("[service] " + line)
-    return code if isinstance(code, int) else 1
+    # 以 0 退出但 result 是 AUTH_ERROR 的情况也要走自愈，判断交给这里。
+    exit_code = _handle_service_failure(
+        "workbuddy", action, code if isinstance(code, int) else 1, stdout,
+        time.monotonic() - started)
+    _reshuffle_schedule("workbuddy")
+    return exit_code
 
 
 def _side_service_main(name, loader, argv):
@@ -2067,14 +2503,11 @@ def _side_service_main(name, loader, argv):
                     % (name, action))
         return 2
 
+    kind = "qoder" if name.startswith("qoder") else "trae"
+    started = time.monotonic()
+    stdout = ""
     try:
-        module = loader()
-        # qoder_signin 的时间预算在模块加载时记下，长期驻留的进程里要重置，
-        # 否则「预算耗尽」会让任务什么都不做。
-        if hasattr(module, "_started_at"):
-            module._started_at = time.monotonic()
-        code = module.main([action])
-        return code if isinstance(code, int) else 1
+        code = _run_side_once(kind, action, loader=loader)
     except Exception as exc:
         import traceback
         detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
@@ -2084,7 +2517,343 @@ def _side_service_main(name, loader, argv):
                 fh.write("[%s %s] %s\n" % (name, action, detail))
         except Exception:
             pass
-        return 1
+        code = 1
+        stdout = json.dumps({"result": "ERROR", "report": detail})
+
+    exit_code = _handle_service_failure(kind, action, code, stdout,
+                                        time.monotonic() - started)
+    _reshuffle_schedule(kind)
+    return exit_code
+
+# ---------------------------------------------------------------------------
+# 计划任务失败自愈
+# ---------------------------------------------------------------------------
+#
+# 计划任务在后台跑，失败只在日志里留一行，用户看不到。这里按固定顺序处理：
+#
+#   ① 写失败记录（控制台起来后第一眼就能看到原文）
+#   ② 拉起或激活控制台（同一类型 6 小时内只拉一次，避免半夜反复弹窗）
+#   ③ 重新导入本机登录态（Trae 扫描客户端、WorkBuddy / Qoder 重读登录文件）
+#   ④ 用剩余时间预算重试一次，结果回写记录
+#
+# 第 ③ 步针对的就是「没有会话 Cookie 可续期，请重新导入本机登录态」：
+# 原样展示报错，同时真的去读一遍本机客户端的登录态，再重试。
+
+SERVICE_TASK_NAME = {"workbuddy": "WorkBuddyAutoSignin",
+                     "qoder": "QoderDailyCredits",
+                     "trae": "TraeDailyCheckin"}
+
+# 计划任务的 ExecutionTimeLimit 减去 60 秒安全余量；重试必须在这之内结束，
+# 否则任务会被任务计划程序直接强杀，连重试结论都写不回去。
+SERVICE_TIME_LIMIT = {"workbuddy": 540, "qoder": 240, "trae": 540}
+
+RETRY_MIN_SECONDS = 60         # 剩余时间不足这么多就不重试
+SURFACE_COOLDOWN = 6 * 3600    # 同一类型失败，6 小时内不重复拉起窗口
+
+FAIL_RESULTS = ("ERROR", "AUTH_ERROR", "NO_AUTH", "NO_CLIENT",
+                "INACTIVE", "EXPIRED", "FAILED")
+
+
+def _service_log_path(kind):
+    if kind == "qoder":
+        return _qoder_log_path()
+    if kind == "trae":
+        return _trae_log_path()
+    return _signin_log_path()
+
+
+def _last_log_payload(kind):
+    """从对应日志的最后几行里取一条 JSON 结果。
+
+    silent 模式不往 stdout 打东西（emit 直接写日志），所以失败原因只能从
+    日志里捞。Trae / Qoder / WorkBuddy 的日志行格式都是「[时间] {json}」。
+    """
+    lines = []
+    try:
+        with open(_service_log_path(kind), "r", encoding="utf-8",
+                  errors="replace") as fh:
+            lines = fh.readlines()[-40:]
+    except OSError:
+        pass
+    for line in reversed(lines):
+        idx = line.find("{")
+        if idx < 0:
+            continue
+        try:
+            payload = json.loads(line[idx:])
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _log_age(kind):
+    """日志文件距今多少秒；拿不到就当成很旧。"""
+    try:
+        return time.time() - os.path.getmtime(_service_log_path(kind))
+    except OSError:
+        return 1e9
+
+
+def _service_failure(kind, code, stdout=""):
+    """判断这次运行算不算失败，并取出可展示的原文。
+
+    除了退出码，还要看 result：脚本对「凭据过期」这类可预期失败有时仍以
+    0 退出，只看退出码会漏报。反过来，0 退出时只看日志最后一行也不行——
+    那可能是上一次失败的残留，所以要求日志是刚写入的。
+    """
+    payload = (Api._parse_payload(stdout or "") or {})
+    if not payload:
+        tail = _last_log_payload(kind)
+        # 只认刚写入的日志：可能是上一次失败的残留，拿它当这次的原因会误导。
+        fresh = _log_age(kind) < 600
+        usable = bool(tail) and fresh and (
+            code == 0 or str(tail.get("result") or "") in FAIL_RESULTS)
+        payload = tail if usable else {}
+    result = str(payload.get("result") or "")
+    failed = code != 0 or result in FAIL_RESULTS
+    if not failed:
+        return None
+    report = (payload.get("report") or payload.get("error")
+              or payload.get("message") or "")
+    if not report:
+        report = "计划任务退出码 %s，日志里没有可读结论" % code
+    return {"result": result or "ERROR", "report": str(report), "exit": code}
+
+
+def _reimport_local(kind):
+    """重新读取本机客户端登录态；返回 (ok, 一句可展示的结论)。"""
+    try:
+        if kind in ("workbuddy", "qoder"):
+            if kind == "workbuddy":
+                signin = _load_signin()
+                auth_file, _looked = signin.find_auth_file()
+                if not auth_file:
+                    return False, "未找到本机 WorkBuddy 登录凭据"
+                session = signin.resolve_session(
+                    signin.load_session_retry(auth_file))
+                label = "WorkBuddy"
+            else:
+                session = _load_qoder().load_session()
+                label = "Qoder"
+            if not session:
+                return False, "未找到本机 %s 登录态" % label
+            return True, "已重新读取本机 %s 登录态" % label
+
+        trae = _load_trae()
+        payload = trae.import_local()
+        ok = payload.get("result") in ("OK", "NO_CHANGE")
+        report = payload.get("report") or ("已重新导入本机 Trae 登录态"
+                                           if ok else "本机 Trae 登录态不可用")
+        return ok, str(report)
+    except Exception as exc:
+        return False, "重新导入登录态失败：%s: %s" % (type(exc).__name__, exc)
+
+
+def _run_side_once(kind, action, loader=None, budget=None):
+    """跑一次 Qoder / Trae 的 main()；budget 用于压缩重试的时间预算。"""
+    module = (loader or (_load_qoder if kind == "qoder" else _load_trae))()
+    old_budget = getattr(module, "BUDGET_SECONDS", None)
+    if budget and old_budget is not None:
+        module.BUDGET_SECONDS = float(budget)
+    # 时间预算在模块加载时记下；长期驻留的进程里要重置，
+    # 否则「预算耗尽」会让任务什么都不做。
+    if hasattr(module, "_started_at"):
+        module._started_at = time.monotonic()
+    try:
+        code = module.main([action])
+    finally:
+        # 重试只是临时收紧预算；不还原会让控制台后续的手动操作也变短。
+        if old_budget is not None:
+            module.BUDGET_SECONDS = old_budget
+    return code if isinstance(code, int) else 1
+
+
+def _retry_text(code, payload):
+    """重试的结论：优先用脚本自己的 report，没有就按退出码兜底。"""
+    if isinstance(payload, dict):
+        report = payload.get("report") or payload.get("error")
+        if report:
+            return str(report)
+    return "重试成功" if code == 0 else "重试仍失败（exit=%s）" % code
+
+
+def _retry_service_action(kind, action, elapsed):
+    """用剩余预算重试一次；返回 (exit_code 或 None, 结论)。"""
+    budget = SERVICE_TIME_LIMIT.get(kind, 300) - elapsed - 30
+    if budget < RETRY_MIN_SECONDS:
+        return None, ("首轮已用 %.0f 秒，剩余时间不足，未自动重试"
+                      % elapsed)
+    budget = int(min(budget, 240))
+
+    if kind == "workbuddy":
+        old = os.environ.get("WORKBUDDY_BUDGET_SECONDS")
+        os.environ["WORKBUDDY_BUDGET_SECONDS"] = str(budget)
+        try:
+            code, stdout, _stderr = Api._invoke(action)
+        finally:
+            if old is None:
+                os.environ.pop("WORKBUDDY_BUDGET_SECONDS", None)
+            else:
+                os.environ["WORKBUDDY_BUDGET_SECONDS"] = old
+        payload = (Api._parse_payload(stdout or "")
+                   or _last_log_payload("workbuddy") or {})
+    else:
+        try:
+            code = _run_side_once(kind, action, budget=budget)
+        except Exception as exc:
+            return 1, "重试异常：%s: %s" % (type(exc).__name__, exc)
+        payload = _last_log_payload(kind) or {}
+    return code, _retry_text(code, payload)
+
+
+def _console_command():
+    """拉起控制台要执行的命令与工作目录。
+
+    冻结后跑 exe 自身（不带参数即界面）；源码运行时优先 pythonw，
+    避免在用户面前弹出一个黑框。
+    """
+    if getattr(sys, "frozen", False):
+        exe = os.path.abspath(sys.executable)
+        return [exe], os.path.dirname(exe)
+    script = os.path.abspath(__file__)
+    exe = sys.executable
+    try:
+        import win_service
+        exe = win_service.find_pythonw() or exe
+    except Exception:
+        pass
+    return [exe, script], os.path.dirname(script)
+
+
+def _surface_console(kind, previous=None):
+    """把控制台叫到用户面前；返回一句结果说明（写进失败记录）。"""
+    if os.name != "nt" or os.environ.get("WORKBUDDY_NO_SURFACE") == "1":
+        # 非 Windows 没有计划任务；排障/自动化测试时也不想被弹窗打断。
+        return "skipped"
+
+    last = (previous or {}).get("surface_at") or 0
+    try:
+        last = float(last)
+    except (TypeError, ValueError):
+        last = 0
+    if time.time() - last < SURFACE_COOLDOWN:
+        return "cooldown"
+
+    try:
+        import win_guard
+        # find_own_window() 只看本进程的窗口；服务进程没有界面，永远返回
+        # None。要判断「控制台是否已经开着」，必须按 exe 名找别的进程。
+        if (getattr(sys, "frozen", False)
+                and win_guard.find_window_by_process(
+                    os.path.basename(sys.executable),
+                    exclude_pid=os.getpid())):
+            win_guard.activate_existing_window()
+            return "activated"
+    except Exception as exc:
+        _trace("激活已有窗口失败: %r" % (exc,))
+
+    try:
+        argv, cwd = _console_command()
+        # 清掉 PyInstaller 传给子进程的临时解包目录：不清的话，新进程会
+        # 复用本进程的 _MEIxxxx，而本进程退出时会把那个目录删掉——窗口
+        # 起来几秒后就因为找不到 Python.Runtime.dll 崩掉（实测如此）。
+        env = dict(os.environ)
+        for key in ("_MEIPASS2", "_PYI_APPLICATION_HOME_DIR",
+                    "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL"):
+            env.pop(key, None)
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        kwargs = {}
+        if os.name == "nt":
+            kwargs["creationflags"] = 0x00000008   # DETACHED_PROCESS
+        subprocess.Popen(argv, cwd=cwd, env=env, close_fds=True,
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **kwargs)
+    except Exception as exc:
+        return "failed: %s" % exc
+    return "launched"
+
+
+def _read_service_alerts():
+    try:
+        import win_service
+        return win_service.read_alerts(_diag_dir())
+    except Exception as exc:
+        _trace("读取失败记录失败: %r" % (exc,))
+        return []
+
+
+def _write_service_alert(record):
+    try:
+        import win_service
+        return win_service.write_alert(_diag_dir(), record)
+    except Exception as exc:
+        _trace("写入失败记录失败: %r" % (exc,))
+        return None
+
+
+def _log_recovery(kind, record):
+    """把自愈过程写进对应产品的日志，界面日志面板能直接看到。"""
+    lines = ["【自动恢复】计划任务失败：%s" % record.get("report", "")]
+    if record.get("reimport_report"):
+        lines.append("【自动恢复】重新导入本机登录态：%s"
+                     % record["reimport_report"])
+    if record.get("retry_report"):
+        lines.append("【自动恢复】重试一次：%s" % record["retry_report"])
+    for line in lines:
+        if kind == "trae":
+            _append_trae_log({"result": "RECOVERY", "report": line}, "recovery")
+        elif kind == "qoder":
+            _append_qoder_log({"result": "RECOVERY", "report": line})
+        else:
+            _append_log(line)
+
+
+def _handle_service_failure(kind, action, code, stdout, elapsed):
+    """失败后的固定动作；返回最终退出码（重试成功则算成功）。"""
+    failure = _service_failure(kind, code, stdout)
+    if failure is None:
+        return code
+
+    record = {"kind": kind,
+              "task": SERVICE_TASK_NAME.get(kind, ""),
+              "action": action,
+              "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+              "exit": code,
+              "result": failure["result"],
+              "report": failure["report"],
+              "stage": "failed"}
+    # 上一版记录要留到拉起判断之后：新一轮失败会覆盖它，
+    # 先读出来才能实现「6 小时内不重复弹窗」。
+    previous = next((item for item in _read_service_alerts()
+                     if item.get("kind") == kind), {})
+    # 先落一版快照：控制台一起来就能看到原文，不必等重试跑完。
+    _write_service_alert(dict(record))
+
+    record["surface"] = _surface_console(kind, previous)
+    record["surface_at"] = time.time()
+
+    ok, report = _reimport_local(kind)
+    record["reimport_ok"] = ok
+    record["reimport_report"] = report
+
+    try:
+        retry_code, retry_report = _retry_service_action(kind, action, elapsed)
+    except Exception as exc:
+        retry_code, retry_report = 1, "重试异常：%s: %s" % (
+            type(exc).__name__, exc)
+    record["retry_report"] = retry_report
+    if retry_code is not None:
+        record["retry_exit"] = retry_code
+        record["recovered"] = retry_code == 0
+    record["stage"] = "done"
+
+    _write_service_alert(record)
+    _log_recovery(kind, record)
+    return 0 if record.get("recovered") else code
+
 
 
 def main():

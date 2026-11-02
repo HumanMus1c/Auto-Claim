@@ -94,7 +94,7 @@
 <div class="shell">
   <!-- 侧边栏：在 WorkBuddy 与 Qoder CN 两个监控页之间切换 -->
   <aside class="sidebar" aria-label="监控页面切换">
-    <div class="side-title">监控</div>
+    <div class="side-title" title="绿点 可用 · 黄点 未登录 · 灰空心 未安装 · 红点 异常">监控</div>
     <button class="side-tab active" type="button" data-page="workbuddy">
       <span class="side-badge">W</span>
       <span class="side-text">
@@ -119,6 +119,14 @@
       </span>
       <span class="side-dot" id="traeDot"></span>
     </button>
+    <!-- 状态点图例：7px 的小圆点不解释就只能靠猜，尤其「未安装」和
+         「未登录」在浅色背景上很容易被看成绿色。 -->
+    <div class="side-legend" aria-label="状态点图例">
+      <span><i class="side-dot ok"></i>可用</span>
+      <span><i class="side-dot warn"></i>未登录</span>
+      <span><i class="side-dot off"></i>未安装</span>
+      <span><i class="side-dot err"></i>异常</span>
+    </div>
     <div class="side-foot">
       <span class="side-foot-label">WorkBuddy 状态</span>
       <span class="side-foot-value" id="wbSideHint">未检测</span>

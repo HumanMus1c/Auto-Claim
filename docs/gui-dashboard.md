@@ -34,7 +34,7 @@
 
 左侧是固定侧边栏，顶部仍为全局顶栏：
 
-1. **侧边栏** —— 在「WorkBuddy」「Qoder CN」「Trae」三个监控页之间切换，记住上次选择（`localStorage` 的 `wbPage`）；三项各带连接状态圆点，左下角分别显示今日签到 / 领取结果：WorkBuddy 与 Trae 为「已签到 / 未签到」，Qoder 为「已领取 / 未领取」
+1. **侧边栏** —— 在「WorkBuddy」「Qoder CN」「Trae」三个监控页之间切换，记住上次选择（`localStorage` 的 `wbPage`）；三项各带连接状态圆点，左下角分别显示今日签到 / 领取结果：WorkBuddy 与 Trae 为「已签到 / 未签到」，Qoder 为「已领取 / 未领取」。圆点四态：绿「可用」（本机登录态可读）、黄「未登录」、灰空心「未安装」、红「异常」；「未安装」由后端探测本机桌面端（目录 / 启动器 / 卸载表 + 进程）判定，卸载后残留的凭据不会被画成绿点。Qoder 若显式配置了 `QODER_TOKEN`，没有桌面端也算可用。
 2. 顶栏 —— 环境信息（Python 版本、平台、`signin.py` 定位结果）+ 主题切换
 
 WorkBuddy 页自上而下：
@@ -130,12 +130,14 @@ Trae 同样使用独立的 `_TRAE_LOCK` 和 `_trae_busy` 状态。`trae_signin.p
 
 ## 计划任务（Windows 任务计划程序）
 
-控制台把后台签到注册成两个 Windows 计划任务，与 `install-windows.ps1` 创建的任务同名、同触发器：
+控制台把后台签到注册成两个 Windows 计划任务，与 `install-windows.ps1` 创建的任务同名、套用同一套随机化规则：
 
 | 任务 | 频率 | 内容 |
 |---|---|---|
-| `WorkBuddyAutoSignin` | 每天 00:05 | 签到 + 成长中心 |
-| `WorkBuddyGrowthPoll` | 每天 01/05/09/13/17/21 点 | 补签（未签才签）+ 成长中心全套 |
+| `WorkBuddyAutoSignin` | 每天 1 次（基准 00:05，随机延后最多 15 分钟） | 签到 + 成长中心 |
+| `WorkBuddyGrowthPoll` | 每天 6 次（基准 01/05/09/13/17/21 点，各前后浮动 15 分钟） | 补签（未签才签）+ 成长中心全套 |
+
+触发时刻由 `dashboard/schedule_jitter.py` 生成：系统时钟纳秒位、开机至今的分钟数、epoch 与 uptime 各自的 10 分钟边界序号三层叠加后过 BLAKE2b，落到 ±15 分钟窗口内。任务每次跑完由 `win_service.reshuffle()` 重排——只重抽「今天已经过去」的点，未到的点保留；去重只在同一个进程内做，跨进程不冷却（否则手动运行一次就会锁住第二天的时刻）。偏移始终锚定配置里的基准点（存在 `schedule-jitter.json`），不在上一次结果上叠加，否则误差会逐日滚雪球。面板的 `when` 是从任务里回读的真实时刻（前两个，悬停看完整列表），不是常量。
 
 面板显示每个任务的状态（就绪 / 运行中 / 已停用）、上次运行时间、上次结果和下次运行时间，并读取 `signin.log` 的最后一行作为最近活动。状态在空闲时每 3 分钟静默刷新一次，任务运行中每 20 秒刷新一次；执行操作后立即刷新。每次刷新都要起一次 PowerShell，所以前台停在 Qoder / Trae 页或窗口不可见时会跳过本轮，不做无用查询。
 
@@ -156,6 +158,20 @@ Trae 同样使用独立的 `_TRAE_LOCK` 和 `_trae_busy` 状态。`trae_signin.p
 
 > 若「安装 / 修复」报 `0x80070005`（拒绝访问），用登录 WorkBuddy 的同一账号以管理员身份启动控制台后再安装。提权只用于注册任务，任务本身仍以普通权限运行。
 
+### 失败自愈（三个任务共用）
+
+计划任务在后台跑，失败时没人看得见——日志里躺着「没有会话 Cookie 可续期，请重新导入本机登录态」，用户不会主动去翻。所以失败后按固定顺序处理：
+
+1. 把失败原文写进 `%LOCALAPPDATA%\Auto-Claim\dashboard\service-alert.json`（原子替换，界面不会读到半截 JSON）；
+2. 控制台没开着就启动它，已经开着就激活窗口。同一类型 6 小时内只拉一次，避免半夜每次轮询都弹窗；
+3. 重新导入本机登录态：WorkBuddy / Qoder 重读凭据文件，Trae 执行 `import_local()` 扫描客户端目录；
+4. 用任务剩余时间预算重试一次（首轮耗时 + 重试必须落在 `ExecutionTimeLimit` 内），结果回写记录；
+5. 重试成功时退出码归零，任务计划程序里显示成功；否则保留原始退出码并留下可读原因。
+
+控制台在对应模块（WorkBuddy / Qoder / Trae）的「计划任务」区块原样展示失败原文、重新导入结果和重试结论，并提供「重新导入并重试 / 知道了」两个按钮。提示随 `bootstrap()` 一起下发，之后每 20 秒读一次本地 JSON——读文件比每次起 PowerShell 便宜得多。
+
+`WORKBUDDY_NO_SURFACE=1` 可关闭「拉起窗口」这一步，排障或自动化测试时用；其余步骤照常执行。
+
 ### QoderDailyCredits（独立任务）
 
 Qoder 页的「计划任务」卡片只操作 `QoderDailyCredits` 一个任务，不会安装、启停或卸载 WorkBuddy 的两个任务。触发点与 `install-qoder-windows.ps1` 一致：按 UTC+8 每天 10:00 活动刷新，主触发点晚 5 分钟，另排 0/1/5/9/13 小时四次补跑，换算成本机时间后依次为 10:05、11:05、15:05、19:05、23:05（以 UTC+8 为例）。任务动作固定为：
@@ -169,7 +185,7 @@ pythonw.exe <qoder_signin.py 的绝对路径> silent
 - **状态刷新**：任务运行中每 20 秒、空闲时每 180 秒读取一次状态，并显示 `qoder_signin.log` 最后一行。
 - **手动领取**：调用 `qoder_signin.py auto`，不依赖计划任务；结果同时写入 Qoder 页日志和 `qoder_signin.log`，刷新后仍可追溯。
 
-Qoder 任务依赖系统 Python；打包后的控制台 exe 不会被用作 Qoder 任务的运行器。若机器上没有 `pythonw.exe`，「安装 / 修复」会直接报错，而不会注册一个跑不起来的任务。
+Qoder 任务优先用系统 `pythonw.exe`，找不到时退回控制台 exe 的 `--qoder-service`（exe 内已打包解释器），两者都与手工执行 `python qoder_signin.py silent` 等价。
 
 ### TraeDailyCheckin（独立任务）
 
@@ -184,7 +200,7 @@ pythonw.exe <trae_signin.py 的绝对路径> silent
 - **状态刷新**：任务运行中每 20 秒、空闲时每 180 秒读取一次状态，并显示 `trae_signin.log` 最后一行。
 - **手动签到**：调用 `trae_signin.py auto`，不依赖计划任务，结果同时写入 Trae 页日志和 `trae_signin.log`。
 
-与 Qoder 一样，Trae 任务依赖系统 Python；`pythonw.exe` 缺失时安装会直接失败。它不会复用控制台 exe 的 `--service` 分支。
+与 Qoder 一样，Trae 优先使用系统 `pythonw.exe`，找不到时退回 `--trae-service`（控制台 exe 自身）。
 
 ## 单实例与 UI 看门狗
 

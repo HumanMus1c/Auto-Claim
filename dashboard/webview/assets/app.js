@@ -56,6 +56,87 @@ let WB_STATUS = null;
 let WB_DOCTOR = null;
 let WB_ACCOUNT_PENDING = null;
 
+/* 本机桌面端安装 / 运行状态，由后端 bootstrap / monitor 一起下发。
+ * 形状：{installed: true|false|null, running: true|false|null, path, source}。
+ * null 表示探测不可用（非 Windows 或探测异常），此时只看登录态，
+ * 不把「未知」当成「未安装」。 */
+const DESKTOP = { workbuddy: null, qoder: null, trae: null };
+
+function applyDesktopInfo(map) {
+  if (!map || typeof map !== 'object') return;
+  ['workbuddy', 'qoder', 'trae'].forEach((kind) => {
+    const item = map[kind];
+    if (item && typeof item === 'object') DESKTOP[kind] = item;
+  });
+  paintDesktopAbsent();
+}
+
+/* 还没拿到登录态数据时，先把「本机没装」直接画出来：
+ * 否则启动后一两秒里三个点都是灰的，用户会误以为「连接中」，
+ * 而对压根没装的模块来说，这一两秒的等待毫无意义。 */
+function paintDesktopAbsent() {
+  if (desktopMissing('workbuddy') && !WB_DOCTOR && !WB_STATUS) {
+    const hint = $('wbSideHint');
+    if (hint) hint.textContent = '未安装';
+    wbSetDot('off', '本机未检测到 WorkBuddy 桌面端');
+  }
+  if (desktopMissing('qoder') && !QODER_DATA) {
+    const hint = $('qoderSideHint');
+    if (hint) hint.textContent = '未安装';
+    qoderSetDot('off', '本机未检测到 Qoder CN 桌面端（安装并登录后才会连接）');
+  }
+  if (desktopMissing('trae') && !TRAE_DATA) {
+    const hint = $('traeSideHint');
+    if (hint) hint.textContent = '未安装';
+    traeSetDot('off', '本机未检测到 Trae 桌面端');
+  }
+}
+
+function desktopInfo(kind) {
+  const item = DESKTOP[kind];
+  return item && typeof item === 'object' ? item : null;
+}
+
+function desktopMissing(kind) {
+  const item = desktopInfo(kind);
+  return !!(item && item.installed === false);
+}
+
+/* 安装目录（去掉 exe 文件名），用于 tooltip 里说明「为什么算已安装」。 */
+function desktopPath(kind) {
+  const item = desktopInfo(kind);
+  const raw = item && item.path ? String(item.path) : '';
+  return raw.replace(/[\\/][^\\/]+$/, '');
+}
+
+/* 状态点统一语义（侧边栏「监控」下方有图例）：
+ *   ok   绿   可用：本机登录态可读（不要求桌面端正在运行）
+ *   warn 黄   未登录：已安装，但没登录 / 没配置账号
+ *   err  红   异常：登录态失效或读取失败
+ *   off  灰   未安装：本机没有这个桌面端（空心）
+ *   busy 黄闪 正在检测
+ * 颜色只在鼠标悬停时给出 title 是不够的，所以每个点都带 aria-label，
+ * 图例也放在侧边栏里，避免 7px 的小圆点被当成「连上了」。 */
+const DOT_HINT = {
+  ok: '可用：本机登录态可读',
+  warn: '未登录：需要在该应用里登录一次',
+  err: '异常：登录态失效或读取失败',
+  off: '未安装：本机未检测到该桌面端',
+  busy: '正在检测…',
+  '': '尚未检测',
+};
+
+function paintDot(id, kind, detail) {
+  const dot = $(id);
+  if (!dot) return;
+  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+  dot.title = detail || DOT_HINT[kind] || DOT_HINT[''];
+  if (typeof dot.setAttribute === 'function') {
+    dot.setAttribute('aria-label', dot.title);
+    dot.setAttribute('data-state', kind || 'unknown');
+  }
+}
+
 function savedPage() {
   try {
     const saved = localStorage.getItem(PAGE_KEY);
@@ -458,49 +539,49 @@ function wbCredentialLabel(fmt) {
     : (fmt || '—');
 }
 
-function wbSetDot(kind) {
-  const dot = $('wbDot');
-  if (!dot) return;
-  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+function wbSetDot(kind, detail) {
+  paintDot('wbDot', kind, detail);
 }
 
-/** 侧边栏 WorkBuddy 状态：绿点表示登录态，文字只表示今日签到结果。 */
+/** 侧边栏 WorkBuddy 状态点：绿=登录态可读，灰=本机没装，黄=未登录，红=异常。 */
+function wbDotState(doctor, status, desktop) {
+  if (desktop && desktop.installed === false) {
+    return { kind: 'off', title: '本机未检测到 WorkBuddy 桌面端' };
+  }
+  if (doctor) {
+    if (doctor.result === 'AUTH_READY') {
+      return { kind: 'ok', title: 'WorkBuddy 登录态已就绪' };
+    }
+    if (doctor.result === 'NO_AUTH') {
+      return { kind: 'warn', title: '未找到 WorkBuddy 登录态' };
+    }
+    if (doctor.result === 'AUTH_REJECTED') {
+      return { kind: 'err', title: 'WorkBuddy 登录态已失效，请重新登录' };
+    }
+    return { kind: 'err',
+             title: doctor.report || doctor.result || 'WorkBuddy 登录态异常' };
+  }
+  if (status) {
+    if (status.result === 'AUTH_REJECTED') {
+      return { kind: 'err', title: 'WorkBuddy 登录态已失效，请重新登录' };
+    }
+    if (status.result === 'NO_AUTH') {
+      return { kind: 'warn', title: '未找到 WorkBuddy 登录态' };
+    }
+    return { kind: 'ok', title: status.report || '签到状态已更新' };
+  }
+  return { kind: '', title: '尚未检测 WorkBuddy 登录态' };
+}
+
+/** 侧边栏 WorkBuddy 状态：状态点表示登录态，文字只表示今日签到结果。 */
 function wbSideState() {
   const hint = $('wbSideHint');
   if (!hint) return;
 
   const doctor = WB_DOCTOR;
   const status = WB_STATUS;
+  const dot = wbDotState(doctor, status, desktopInfo('workbuddy'));
   let text = '未检测';
-  let kind = '';
-  let title = '';
-
-  if (doctor) {
-    if (doctor.result === 'AUTH_READY') {
-      kind = 'ok';
-      title = 'WorkBuddy 登录态已就绪';
-    } else if (doctor.result === 'NO_AUTH') {
-      kind = 'warn';
-      title = '未找到 WorkBuddy 登录态';
-    } else if (doctor.result === 'AUTH_REJECTED') {
-      kind = 'err';
-      title = 'WorkBuddy 登录态已失效，请重新登录';
-    } else {
-      kind = 'err';
-      title = doctor.report || doctor.result || 'WorkBuddy 登录态异常';
-    }
-  } else if (status) {
-    if (status.result === 'AUTH_REJECTED') {
-      kind = 'err';
-      title = 'WorkBuddy 登录态已失效，请重新登录';
-    } else if (status.result === 'NO_AUTH') {
-      kind = 'warn';
-      title = '未找到 WorkBuddy 登录态';
-    } else {
-      kind = 'ok';
-      title = status.report || '签到状态已更新';
-    }
-  }
 
   if (status) {
     const checked = status.today_checked_in === true
@@ -510,10 +591,11 @@ function wbSideState() {
     // 登录态已读出但还没查询签到：先按未签到展示，查询完成后自动更正。
     text = '未签到';
   }
+  if (dot.kind === 'off') text = '未安装';
 
   hint.textContent = text;
-  hint.title = title;
-  wbSetDot(kind);
+  hint.title = dot.title;
+  wbSetDot(dot.kind, dot.title);
 }
 
 function renderWorkbuddyAccount() {
@@ -554,8 +636,8 @@ function renderWorkbuddyAccount() {
     }
   } else if (status && status.result) {
     stateText = status.result === 'OK' || status.result === 'ALREADY'
-      || status.result === 'CLAIMED' ? '已连接' : status.result;
-    stateKind = stateText === '已连接' ? 'ok' : 'warn';
+      || status.result === 'CLAIMED' ? '已登录' : status.result;
+    stateKind = stateText === '已登录' ? 'ok' : 'warn';
   }
   if (status && status.result === 'AUTH_REJECTED') {
     stateText = '需重新登录';
@@ -1144,6 +1226,15 @@ window.__onBackend = function (kind, data) {
   } else if (kind === 'trae_done') {
     onTraeDone(data);
 
+  } else if (kind === 'service_alert') {
+    // 恢复流程（重新导入 / 重试）的进度：写进对应模块的日志，并刷新提示。
+    const target = TASK_ALERT_TARGETS[data && data.kind];
+    if (target && data.report) {
+      target.log((data.stage === 'done' ? '【计划任务】恢复结果：'
+        : '【计划任务】') + data.report);
+    }
+    loadServiceAlerts();
+
   } else if (kind === 'done') {
     const p = data.payload;
     if (data.action === 'doctor') {
@@ -1440,7 +1531,11 @@ function makeServiceNode(t) {
                    '结果 ' + svcResultText(t.last_result)];
     if (t.next_run) parts.push('下次 ' + t.next_run);
     line2.textContent = parts.join(' · ');
-    line2.title = [t.action, t.last_run, t.next_run].filter(Boolean).join('\n');
+    // 触发时刻是随机生成的，实际排期放进 title，避免第一行被 6 个时间挤爆
+    const jitter = (t.times && t.times.length)
+      ? '随机时刻 ' + t.times.join(' / ') : '';
+    line2.title = [t.action, t.last_run, t.next_run, jitter]
+      .filter(Boolean).join('\n');
   } else {
     line2.textContent = '点击「安装 / 修复」创建此任务';
   }
@@ -1477,6 +1572,114 @@ const SERVICE_HINT = {
 
 const SVC_ALERTS = {};
 
+/* 计划任务在后台跑失败后写下的记录（后端 service-alerts）。
+ * 与 SVC_ALERTS 分开存：前者是「安装/读取失败」的即时反馈，后者是
+ * 「昨夜 00:05 签到失败了、重试结果如何」，生命周期长得多，
+ * 需要按钮和原文，直到用户点「知道了」才消失。 */
+const TASK_ALERTS = {};
+const TASK_ALERT_TARGETS = {
+  workbuddy: {
+    el: 'svcAlert',
+    log: (text) => appendLog(text, 'err'),
+    dot: () => wbSetDot('err', '计划任务执行失败，详见日志'),
+  },
+  qoder: {
+    el: 'qsvcAlert',
+    log: (text) => appendQoderLog(text, 'err'),
+    dot: () => qoderSetDot('err', '计划任务执行失败，详见日志'),
+  },
+  trae: {
+    el: 'tsvcAlert',
+    log: (text) => appendTraeLog(text, 'err'),
+    dot: () => traeSetDot('err', '计划任务执行失败，详见日志'),
+  },
+};
+const ALERT_EL_KIND = { svcAlert: 'workbuddy', qsvcAlert: 'qoder', tsvcAlert: 'trae' };
+const ANNOUNCED_ALERTS = new Set();
+
+function taskAlertInfo(kind, item) {
+  const recovered = item.recovered === true;
+  const when = item.at || '';
+  const name = item.task || '计划任务';
+  const info = {
+    title: (recovered ? name + ' 已自动恢复' : name + ' 签到失败')
+      + (when ? '（' + when + '）' : ''),
+    hint: item.report || '计划任务执行失败，详见日志。',
+    detail: '',
+    actions: [],
+  };
+  const extra = [];
+  if (item.reimport_report) {
+    extra.push('重新导入本机登录态：' + item.reimport_report);
+  }
+  if (item.retry_report) {
+    extra.push('自动重试：' + item.retry_report);
+  }
+  info.extra = extra;
+  info.actions.push({
+    label: recovered ? '再试一次' : '重新导入并重试',
+    onClick: () => taskAlertRetry(kind),
+  });
+  info.actions.push({
+    label: '知道了',
+    onClick: () => taskAlertAck(kind),
+  });
+  return info;
+}
+
+async function loadServiceAlerts(items) {
+  let list = items;
+  if (!list) {
+    const r = await call('service_alerts');
+    list = (r && r.items) || [];
+  }
+  const seen = new Set();
+  list.forEach((item) => {
+    if (!item || !item.kind) return;
+    TASK_ALERTS[item.kind] = item;
+    seen.add(item.kind);
+    announceTaskAlert(item);
+  });
+  Object.keys(TASK_ALERTS).forEach((kind) => {
+    if (!seen.has(kind)) delete TASK_ALERTS[kind];
+  });
+  Object.keys(ALERT_EL_KIND).forEach((elId) => paintServiceAlert(elId));
+}
+
+/* 同一条记录只往日志里播报一次；20 秒轮询不该刷屏。 */
+function announceTaskAlert(item) {
+  const key = item.kind + '|' + (item.at || '') + '|' + (item.stage || '');
+  if (ANNOUNCED_ALERTS.has(key)) return;
+  ANNOUNCED_ALERTS.add(key);
+  const target = TASK_ALERT_TARGETS[item.kind];
+  if (!target) return;
+  target.log('【计划任务】' + (item.task || item.kind) + '：'
+    + (item.report || '执行失败'));
+  if (item.recovered === true) {
+    target.log('【计划任务】重新导入登录态后重试成功');
+  } else if (item.retry_report) {
+    target.log('【计划任务】重试未成功：' + item.retry_report);
+  }
+  if (item.recovered !== true) target.dot();
+}
+
+async function taskAlertRetry(kind) {
+  const target = TASK_ALERT_TARGETS[kind];
+  const r = await call('service_alert_retry', kind);
+  if (!r || r.ok === false) {
+    if (target) target.log('【计划任务】无法重试：' + ((r && r.error) || '未知错误'));
+    return;
+  }
+  if (target) target.log('【计划任务】正在重新导入登录态并重试…');
+}
+
+async function taskAlertAck(kind) {
+  await call('service_alert_ack', kind);
+  delete TASK_ALERTS[kind];
+  const target = TASK_ALERT_TARGETS[kind];
+  if (target) paintServiceAlert(target.el);
+}
+
 function setServiceAlert(elId, result) {
   if (result && result.ok === false) {
     SVC_ALERTS[elId] = {
@@ -1510,7 +1713,9 @@ function syncServiceAlert(elId, status, what) {
 function paintServiceAlert(elId) {
   const el = $(elId);
   if (!el) return;
-  const info = SVC_ALERTS[elId];
+  const kind = ALERT_EL_KIND[elId];
+  const task = kind ? TASK_ALERTS[kind] : null;
+  const info = task ? taskAlertInfo(kind, task) : SVC_ALERTS[elId];
   el.textContent = '';
   if (!info) {
     el.hidden = true;
@@ -1527,6 +1732,13 @@ function paintServiceAlert(elId) {
   hint.textContent = info.hint;
   el.appendChild(hint);
 
+  (info.extra || []).forEach((text) => {
+    const line = document.createElement('span');
+    line.className = 'svc-alert-extra';
+    line.textContent = text;
+    el.appendChild(line);
+  });
+
   if (info.detail) {
     const box = document.createElement('details');
     const summary = document.createElement('summary');
@@ -1536,6 +1748,23 @@ function paintServiceAlert(elId) {
     box.appendChild(summary);
     box.appendChild(code);
     el.appendChild(box);
+  }
+
+  // 计划任务失败提示带操作：重新导入并重试 / 知道了。
+  if (info.actions && info.actions.length) {
+    const row = document.createElement('div');
+    row.className = 'svc-alert-actions';
+    info.actions.forEach((action) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'mini-btn';
+      btn.textContent = action.label;
+      if (typeof btn.addEventListener === 'function') {
+        btn.addEventListener('click', action.onClick);
+      }
+      row.appendChild(btn);
+    });
+    el.appendChild(row);
   }
 }
 
@@ -1739,7 +1968,7 @@ function serviceAction(action) {
 /* ---------- Qoder CN 监控 ---------- */
 
 const QODER_RESULT_LABEL = {
-  OK: '已连接',
+  OK: '已登录',
   CLAIMED: '已领取',
   ALREADY: '本周期已领取',
   INACTIVE: '当前无活动',
@@ -1800,10 +2029,8 @@ function setQoderDd(index, value, title) {
   dd.title = title || '';
 }
 
-function qoderSetDot(kind) {
-  const dot = $('qoderDot');
-  if (!dot) return;
-  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+function qoderSetDot(kind, detail) {
+  paintDot('qoderDot', kind, detail);
 }
 
 function renderQoderAccount(status, doctor) {
@@ -1835,7 +2062,7 @@ function renderQoderAccount(status, doctor) {
   let stateKind = 'warn';
   if (doctor) {
     if (doctor.result === 'OK') {
-      stateText = '已连接';
+      stateText = '已登录';
       stateKind = 'ok';
     } else if (doctor.result === 'NO_AUTH') {
       stateText = '未登录';
@@ -1847,7 +2074,7 @@ function renderQoderAccount(status, doctor) {
       stateKind = 'err';
     }
   } else if (status && status.result === 'OK') {
-    stateText = '已连接';
+    stateText = '已登录';
     stateKind = 'ok';
   }
   if (status && status.result === 'AUTH_REJECTED') {
@@ -1959,7 +2186,7 @@ function renderQoderCards(status, doctor) {
   if (todo.length) stateHint = '可领取 ' + todo.length + ' 项';
   else if (claimed.length) stateHint = '本周期已领取 ' + claimed.length + ' 项';
   setCard('qState', 'qStateHint',
-    stateText === '已连接' && (todo.length || claimed.length)
+    stateText === '已登录' && (todo.length || claimed.length)
       ? (todo.length ? '可领取' : '已领取') : stateText,
     stateHint);
 
@@ -2079,20 +2306,24 @@ function renderQoderLog(log) {
   if (at) at.textContent = log && log.at ? '最近写入 ' + log.at : '尚无日志';
 }
 
-function qoderSideState(status, doctor, healthy) {
-  const hint = $('qoderSideHint');
-  if (!hint) return;
+/* Qoder 状态点：绿=登录态可用，黄=已安装未登录，灰=未安装，红=登录态失效。
+ * 注意：doctor 只验证「本机有没有可解密的凭据」，Qoder 桌面端没运行也能
+ * 通过；所以这里必须同时看后端下发的 desktop.installed——卸载后残留的
+ * 凭据不能把灰点画成绿点。唯一例外是显式配置了 QODER_TOKEN。 */
+function qoderDotState(status, doctor, healthy, desktop) {
   let kind = '';
-  let title = '';
+  let title = '尚未检测 Qoder 登录态';
 
   if (healthy) {
     kind = 'ok';
+    title = 'Qoder 登录态可读';
   } else if (doctor && doctor.result === 'OK') {
     kind = 'ok';
-    title = doctor.report || '登录态可读';
+    title = doctor.report || 'Qoder 登录态可读';
   } else if (doctor && doctor.result === 'NO_AUTH') {
     kind = 'warn';
-    title = '未登录 Qoder CN';
+    const dir = desktopPath('qoder');
+    title = '已安装但未登录 Qoder CN' + (dir ? ' · ' + dir : '');
   } else if (doctor && doctor.result === 'AUTH_REJECTED') {
     kind = 'err';
     title = 'Qoder CN 登录态已失效，请重新登录';
@@ -2101,36 +2332,71 @@ function qoderSideState(status, doctor, healthy) {
     title = status.report || QODER_RESULT_LABEL[status.result] || status.result;
   }
 
-  // 文字只表示本周期领取结果；绿点单独表示登录 / 连接状态。
+  if (desktop && desktop.installed === false) {
+    // 卸载后残留的登录态仍可能通过 doctor：那是「凭据还在」，不是
+    // 「Qoder 可用」。只有用户显式配了 QODER_TOKEN 才算真的能连。
+    if (!(doctor && doctor.token_source === 'env')) {
+      return { kind: 'off', missing: true,
+               title: '本机未检测到 Qoder CN 桌面端（残留登录态不算连接成功）' };
+    }
+    if (kind === 'ok') {
+      return { kind: 'ok', missing: false,
+               title: '通过环境变量 QODER_TOKEN 连接 · 本机未安装桌面端' };
+    }
+  }
+  if (kind === 'ok') {
+    title += (desktop && desktop.running)
+      ? ' · 桌面端运行中'
+      : ' · 桌面端未运行，使用已缓存登录态';
+  }
+  return { kind, missing: false, title };
+}
+
+function qoderSideState(status, doctor, healthy) {
+  const hint = $('qoderSideHint');
+  if (!hint) return;
+
+  const dot = qoderDotState(status, doctor, healthy, desktopInfo('qoder'));
+
+  // 文字只表示本周期领取结果；状态点单独表示登录 / 连接状态。
   let text = '未检测';
+  let claimTitle = '';
   const campaigns = (status && status.campaigns) || [];
   const todo = campaigns.filter((c) => c.active && c.status === 'CLAIMABLE');
   const claimed = campaigns.filter((c) => c.active && c.status === 'CLAIMED');
   if (status) {
     if (todo.length) {
       text = '未领取';
-      title = '可领取：' + todo.map((c) => c.campaign || '?').join('、');
+      claimTitle = '可领取：' + todo.map((c) => c.campaign || '?').join('、');
     } else if (claimed.length) {
       text = '已领取';
-      title = '本周期已领取：' + claimed.map((c) => c.campaign || '?').join('、');
+      claimTitle = '本周期已领取：'
+        + claimed.map((c) => c.campaign || '?').join('、');
     } else if (status.result === 'OK') {
       text = '已领取';
-      title = status.report || '当前没有可领取活动';
+      claimTitle = status.report || '当前没有可领取活动';
     } else {
       text = '未领取';
-      title = title || QODER_RESULT_LABEL[status.result] || status.result;
+      claimTitle = QODER_RESULT_LABEL[status.result] || status.result;
     }
   } else if (doctor) {
     text = '未领取';
   }
+  // 没查到活动又没登录时，说「未领取」会让人以为只是还没点按钮；
+  // 这里直接给出卡住的原因，和状态点的黄色对应。
+  const notLogged = (doctor && doctor.result === 'NO_AUTH')
+    || (status && status.result === 'NO_AUTH');
+  if (notLogged) text = '未登录';
+  if (dot.missing) text = '未安装';
 
   hint.textContent = text;
-  hint.title = title;
-  qoderSetDot(kind);
+  hint.title = claimTitle || dot.title;
+  qoderSetDot(dot.kind, dot.title);
 }
 
 function renderQoder(data) {
   QODER_DATA = data || {};
+  applyDesktopInfo({ qoder: QODER_DATA.desktop });
   const ok = QODER_DATA.ok !== false;
   const status = QODER_DATA.status || null;
   const doctor = QODER_DATA.doctor || null;
@@ -2143,14 +2409,18 @@ function renderQoder(data) {
     renderQoderAccount(null, null);
     renderQoderCampaigns(null);
     renderQoderLog(QODER_DATA.log);
+    const missingScript = /未找到/.test(QODER_DATA.error || '');
     const hint = $('qoderSideHint');
     if (hint) {
-      hint.textContent = '未领取';
+      hint.textContent = missingScript ? '不可用' : '未领取';
       hint.title = QODER_DATA.busy
         ? '领取正在执行'
         : (QODER_DATA.error || 'Qoder 监控不可用');
     }
-    qoderSetDot(QODER_DATA.busy ? 'busy' : 'err');
+    // 脚本缺失是「没装监控组件」，不是登录/网络异常：用灰点而不是红点，
+    // 红点会让人以为 Qoder 登录态坏了。
+    qoderSetDot(QODER_DATA.busy ? 'busy' : (missingScript ? 'off' : 'err'),
+                QODER_DATA.busy ? '' : (QODER_DATA.error || ''));
     if (!QODER_DATA.busy) {
       appendQoderLog('Qoder 监控不可用：' + (QODER_DATA.error || '未知错误'), 'err');
     }
@@ -2498,7 +2768,7 @@ function scheduleQoderServicePoll() {
 /* ---------- Trae 多账号监控 ---------- */
 
 const TRAE_RESULT_LABEL = {
-  OK: '已连接',
+  OK: '成功',
   ALREADY: '今日已签到',
   CLAIMED: '签到成功',
   PARTIAL: '部分成功',
@@ -2577,10 +2847,8 @@ function traeTimeText(ms) {
   return d.toLocaleString('zh-CN', { hour12: false });
 }
 
-function traeSetDot(kind) {
-  const dot = $('traeDot');
-  if (!dot) return;
-  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
+function traeSetDot(kind, detail) {
+  paintDot('traeDot', kind, detail);
 }
 
 function traeActive(data) {
@@ -2725,52 +2993,65 @@ function accountActionButton(label, title, onClick, extraClass, disabled) {
   return btn;
 }
 
+/* Trae 状态点：绿=账号登录态可用，黄=未配置/部分过期，灰=本机没装，红=全部失效。 */
+function traeDotState(data, desktop) {
+  if (desktop && desktop.installed === false) {
+    return { kind: 'off', missing: true, title: '本机未检测到 Trae 桌面端' };
+  }
+  if (!data) {
+    return { kind: '', missing: false, title: '尚未检测 Trae 登录态' };
+  }
+  if (data.ok === false) {
+    return { kind: 'err', missing: false,
+             title: data.error || 'Trae 监控不可用' };
+  }
+  const accounts = data.accounts || [];
+  const enabled = accounts.filter((a) => a.enabled);
+  if (!accounts.length) {
+    return { kind: 'warn', missing: false, title: '未添加 Trae 账号' };
+  }
+  if (!enabled.length) {
+    return { kind: 'warn', missing: false, title: 'Trae 账号均已停用' };
+  }
+  const broken = enabled.filter((a) => a.token_expired && !a.has_session);
+  if (broken.length === enabled.length) {
+    return { kind: 'err', missing: false, title: '全部账号登录态已过期' };
+  }
+  if (broken.length) {
+    return { kind: 'warn', missing: false,
+             title: broken.length + ' 个账号登录态已过期' };
+  }
+  return { kind: 'ok', missing: false,
+           title: 'Trae 登录态可用 · ' + enabled.length + ' 个启用账号' };
+}
+
 function traeSideState() {
   const hint = $('traeSideHint');
   if (!hint) return;
 
-  // 绿点只表示登录 / 连接状态；文字统一为今日签到结果。
+  // 状态点只表示登录 / 连接状态；文字统一为今日签到结果。
   let text = '未检测';
-  let kind = '';
   let title = '';
+  const dot = traeDotState(TRAE_DATA, desktopInfo('trae'));
 
-  if (TRAE_DATA && TRAE_DATA.ok === false) {
-    text = '未签到';
-    kind = 'err';
-    title = TRAE_DATA.error || 'Trae 监控不可用';
-  } else if (TRAE_DATA) {
+  if (TRAE_DATA && TRAE_DATA.ok !== false) {
     const accounts = TRAE_DATA.accounts || [];
     const enabled = accounts.filter((a) => a.enabled);
-    if (!accounts.length) {
-      text = '未签到';
-      kind = 'warn';
-      title = '未添加 Trae 账号';
-    } else if (!enabled.length) {
-      text = '未签到';
-      kind = 'warn';
-      title = 'Trae 账号均已停用';
-    } else {
+    if (enabled.length) {
       const today = traeToday();
       const checked = enabled.filter((a) => traeIsChecked(a, today)).length;
-      const broken = enabled.filter((a) => a.token_expired && !a.has_session);
       text = checked >= enabled.length ? '已签到' : '未签到';
       title = '今日已签 ' + checked + '/' + enabled.length;
-      if (broken.length === enabled.length) {
-        kind = 'err';
-        title = '登录态已过期 · ' + title;
-      } else if (broken.length) {
-        kind = 'warn';
-        title = broken.length + ' 个账号登录态已过期 · ' + title;
-      } else {
-        kind = 'ok';
-      }
+    } else {
+      text = '未签到';
     }
   }
+  if (dot.missing) text = '未安装';
 
-  if (TRAE_BUSY) kind = 'busy';
+  const kind = TRAE_BUSY ? 'busy' : dot.kind;
   hint.textContent = text;
-  hint.title = title;
-  traeSetDot(kind);
+  hint.title = title || dot.title;
+  traeSetDot(kind, TRAE_BUSY ? '' : dot.title);
 }
 
 function renderTraeCards(data) {
@@ -3279,6 +3560,7 @@ function renderTraeLog(log) {
 
 function renderTrae(data) {
   TRAE_DATA = data || {};
+  applyDesktopInfo({ trae: TRAE_DATA.desktop });
   const ok = TRAE_DATA.ok !== false;
 
   if (!ok) {
@@ -4134,6 +4416,9 @@ async function boot(api) {
     ? info.dark : systemPrefersDark();
   applyThemeMode(state.themeMode, { systemDark: initialDark });
   if (info.accent) applyAccent(info.accent);
+  // 先记住本机有没有装三个桌面端，后面每个模块的状态点都要用；
+  // 这样「未安装」不会因为本地残留凭据被画成「已连接」。
+  applyDesktopInfo(info.desktop);
 
   $('env').textContent = 'Python ' + info.python + ' · ' + info.platform;
   $('env').title = info.executable;
@@ -4145,7 +4430,7 @@ async function boot(api) {
   if (!info.signin_exists) {
     const hint = $('wbSideHint');
     if (hint) hint.textContent = '缺少 signin.py';
-    wbSetDot('err');
+    wbSetDot('off', '缺少 signin.py，WorkBuddy 监控不可用');
     appendLog('未找到 signin.py。', 'err');
     appendLog('程序按以下顺序找过（都不存在）：', 'meta');
     (info.signin_searched || []).forEach((p) => appendLog('  ' + p, 'meta'));
@@ -4206,6 +4491,13 @@ async function boot(api) {
     scheduleServicePoll();
   });
 
+  // 计划任务失败提示：启动即读一次（后端随 bootstrap 一起下发），
+  // 之后 20 秒刷新一次。读的是本地 JSON，比每次起 PowerShell 便宜得多。
+  loadServiceAlerts(info.alerts || []).catch(() => {});
+  setInterval(() => {
+    if (!document.hidden) loadServiceAlerts().catch(() => {});
+  }, 20000);
+
   setPage(savedPage());
 
   // Qoder / Trae 不再等用户切页才开始检测：启动后按空闲时间自动预取。
@@ -4215,13 +4507,13 @@ async function boot(api) {
   if (!info.qoder_exists) {
     const hint = $('qoderSideHint');
     if (hint) hint.textContent = '缺少 qoder_signin.py';
-    qoderSetDot('err');
+    qoderSetDot('off', '缺少 qoder_signin.py，Qoder 监控不可用');
     appendLog('未找到 qoder_signin.py，Qoder 监控页不可用。', 'warn');
   }
   if (!info.trae_exists) {
     const hint = $('traeSideHint');
     if (hint) hint.textContent = '缺少 trae_signin.py';
-    traeSetDot('err');
+    traeSetDot('off', '缺少 trae_signin.py，Trae 监控不可用');
     setTraeAvailability(false);
     appendLog('未找到 trae_signin.py，Trae 监控页不可用。'
       + '请把脚本放到 exe 同目录。', 'warn');

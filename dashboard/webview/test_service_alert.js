@@ -208,6 +208,56 @@ function testStatusRenderShowsAlert() {
   assert.strictEqual(h.el('tsvcState').textContent, '读取失败');
 }
 
+function testTaskAlertShowsReportAndActions() {
+  const h = boot();
+  const record = {
+    kind: 'trae',
+    task: 'TraeDailyCheckin',
+    at: '2026-11-02 13:05:02',
+    report: '成功 0/1 个账号，1 个失败；没有会话 Cookie 可续期，请重新导入本机登录态',
+    reimport_ok: true,
+    reimport_report: '已导入本机账号：新增 0 个，更新 1 个',
+    retry_report: '重试成功',
+    recovered: true,
+    stage: 'done',
+  };
+  // TASK_ALERTS 是 vm 里的 const，不会挂到 context 上，只能进沙箱里赋值
+  vm.runInContext(
+    'TASK_ALERTS.trae = ' + JSON.stringify(record)
+      + "; paintServiceAlert('tsvcAlert');", h.context);
+
+  const el = h.el('tsvcAlert');
+  assert.strictEqual(el.hidden, false, '计划任务失败提示必须可见');
+  assert.ok(el.children[0].textContent.indexOf('已自动恢复') > 0,
+    '恢复成功要在标题里说清楚');
+  assert.ok(el.children[1].textContent.indexOf('没有会话 Cookie 可续期') >= 0,
+    '后端原文必须原样展示，不能改写成笼统结论');
+
+  const texts = el.children.map((child) => child.textContent || '');
+  assert.ok(texts.some((t) => t.indexOf('重新导入本机登录态') >= 0),
+    '要展示重新导入的结果');
+  assert.ok(texts.some((t) => t.indexOf('自动重试') >= 0), '要展示重试结果');
+
+  const actions = el.children[el.children.length - 1];
+  assert.strictEqual(actions.className, 'svc-alert-actions');
+  const labels = actions.children.map((btn) => btn.textContent);
+  assert.deepStrictEqual(labels, ['再试一次', '知道了']);
+}
+
+function testTaskAlertAckClearsBanner() {
+  const h = boot();
+  vm.runInContext(
+    'TASK_ALERTS.workbuddy = ' + JSON.stringify({
+      kind: 'workbuddy', task: 'WorkBuddyAutoSignin',
+      at: '2026-11-02 00:05:01', report: '网络超时',
+    }) + "; paintServiceAlert('svcAlert');", h.context);
+  assert.strictEqual(h.el('svcAlert').hidden, false);
+
+  vm.runInContext("delete TASK_ALERTS.workbuddy; paintServiceAlert('svcAlert');",
+    h.context);
+  assert.strictEqual(h.el('svcAlert').hidden, true, '清掉记录后提示要收起');
+}
+
 const TESTS = [
   ['安装失败给出可读提示与解决办法', testInstallFailureShowsReadableHint],
   ['缺少 hint 时按 code 兜底', testHintFallsBackToCode],
@@ -215,6 +265,8 @@ const TESTS = [
   ['读状态失败带前缀并在恢复后消失', testStatusFailureLabeledAndRecovers],
   ['未解决的安装失败不被刷新覆盖', testUnresolvedInstallAlertSurvivesRefresh],
   ['渲染状态失败时卡片显示提示', testStatusRenderShowsAlert],
+  ['计划任务失败展示原文、恢复结果与操作', testTaskAlertShowsReportAndActions],
+  ['清掉记录后任务提示收起', testTaskAlertAckClearsBanner],
 ];
 
 let failed = 0;

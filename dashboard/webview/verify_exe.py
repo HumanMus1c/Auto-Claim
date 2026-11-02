@@ -24,15 +24,22 @@ FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 # 计划任务解耦系统 Python：exe 自服务入口 + 可读失败提示
                 "_side_service_main", "--trae-service", "--qoder-service",
                 "describe_error", "_missing_script",
+                # 失败自愈：写失败记录、重新导入登录态、限时重试、拉起控制台
+                "service_alerts", "service_alert_retry",
+                "_handle_service_failure", "_surface_console",
                 # 窗口位置/尺寸记忆
                 "win_geometry", "ensure_visible",
+                # 状态点区分「未安装 / 未登录 / 可用」：桌面端安装与运行探测
+                "_desktop_state", "_install_candidates",
                 # 数据目录改名 + 旧目录迁移，以及固定 WebView2 缓存目录
                 "_migrate_legacy_dir", "webview2"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
 # 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。
+# schedule_jitter 例外：win_service 是硬依赖它，缺了整个 --service 都起不来。
 REQUIRED_ENTRIES = ["win_theme.py", "win_title.py", "win_guard.py",
-                    "win_service.py", "win_icon.py", "win_geometry.py"]
+                    "win_service.py", "schedule_jitter.py",
+                    "win_icon.py", "win_geometry.py"]
 
 
 def main():

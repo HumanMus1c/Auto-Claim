@@ -10,9 +10,9 @@
 # 用法：在本仓库目录下，用 PowerShell 运行
 #     powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 #
-# 会创建两个定时任务：
-#   1) WorkBuddyAutoSignin   每天 00:05    签到 + 成长中心，静默写 signin.log
-#   2) WorkBuddyGrowthPoll   每 4 小时     补签（未签才签）+ 成长中心全套
+# 会创建两个定时任务（触发时刻随机，不再固定整点）：
+#   1) WorkBuddyAutoSignin   每天 1 次   基准 00:05，随机延后最多 15 分钟
+#   2) WorkBuddyGrowthPoll   每天 6 次   基准 01/05/09/13/17/21 点，各 ±15 分钟
 #
 # 两者都零 Token、无窗口、开机错过会自动补跑。
 
@@ -100,9 +100,57 @@ Write-Host " $signin" -ForegroundColor Green
 
 # --- 3. 创建两个定时任务 ---
 Write-Host "[3/3] 创建定时任务 ..." -NoNewline
+
+# 触发时刻的随机化：三层系统熵源叠加，与控制台里的 schedule_jitter.py 同构。
+# 固定整点最容易被判定成脚本行为（每天 00:05:00 准时醒来比内容更显眼），
+# 这里把每个基准点打散到 ±15 分钟内：① 系统时钟 Ticks 的末九位（100ns 级
+# 读数抖动）② 开机至今的分钟数（内核 tick 推进，与整分钟边界错位）
+# ③ epoch 与 uptime 各自的 10 分钟边界序号（时间服务、计划任务心跳的粒度）。
+# 三者周期互质，叠加后过 SHA256 打散，不同任务、不同天不会撞到同一个偏移。
+function Get-JitteredTime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Base,
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [int]$Window = 900,
+        [switch]$Forward
+    )
+
+    $ticks = (Get-Date).Ticks
+    $bootMs = 0
+    try { $bootMs = [Environment]::TickCount64 } catch { $bootMs = [Environment]::TickCount }
+    $bootMinute = [int64]($bootMs / 60000)
+    $epochSlot = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 600)
+    $uptimeSlot = [int64]($bootMinute / 10)
+
+    $seed = "$TaskName|$($ticks % 1000000000)|$bootMinute|$epochSlot|$uptimeSlot"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($seed))
+    } finally {
+        $sha.Dispose()
+    }
+    $value = [BitConverter]::ToUInt32($hash, 0)
+
+    # 以分钟为粒度且跳过 0：偏移 0 等于没打散，而触发器只精确到 HH:mm，
+    # 秒级抖动的结果会被格式化吃掉。Forward 只往后放——签到的第一个点
+    # 往前漂会跨过午夜，被算进前一天。
+    $span = [int]($Window / 60)
+    if ($span -lt 1) { $span = 1 }
+    if ($Forward) {
+        $minutes = ($value % $span) + 1
+    } else {
+        $slot = $value % (2 * $span)
+        if ($slot -lt $span) { $minutes = $slot - $span }
+        else { $minutes = $slot - $span + 1 }
+    }
+
+    $baseTime = [datetime]::ParseExact($Base, 'HH:mm', $null)
+    return $baseTime.AddSeconds($minutes * 60).ToString('HH:mm')
+}
+
 $taskRows = @(
-    @{ Name = "WorkBuddyAutoSignin"; When = "每天 00:05"; What = "签到 + 成长中心" },
-    @{ Name = "WorkBuddyGrowthPoll"; When = "每 4 小时"; What = "补签 + 成长中心全套" }
+    @{ Name = "WorkBuddyAutoSignin"; When = "每天 1 次（随机时刻）"; What = "签到 + 成长中心" },
+    @{ Name = "WorkBuddyGrowthPoll"; When = "每天 6 次（随机时刻）"; What = "补签 + 成长中心全套" }
 )
 $registeredTasks = @()
 $verifiedTasks = @()
@@ -119,9 +167,10 @@ try {
     $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive `
         -RunLevel Limited -ErrorAction Stop
 
-    # 任务 1：每日签到（每天 00:05）
+    # 任务 1：每日签到（基准 00:05，随机延后最多 15 分钟）
     $act1 = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$signin`" silent" -ErrorAction Stop
-    $tri1 = New-ScheduledTaskTrigger -Daily -At "00:05" -ErrorAction Stop
+    $at1 = Get-JitteredTime -Base "00:05" -TaskName "WorkBuddyAutoSignin" -Forward
+    $tri1 = New-ScheduledTaskTrigger -Daily -At $at1 -ErrorAction Stop
     $set1 = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden `
             -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries `
             -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -ErrorAction Stop
@@ -138,7 +187,8 @@ try {
     $currentTask = "WorkBuddyGrowthPoll"
     $tri2 = @()
     foreach ($hh in @("01:00", "05:00", "09:00", "13:00", "17:00", "21:00")) {
-        $tri2 += New-ScheduledTaskTrigger -Daily -At $hh -ErrorAction Stop
+        $jittered = Get-JitteredTime -Base $hh -TaskName "WorkBuddyGrowthPoll"
+        $tri2 += New-ScheduledTaskTrigger -Daily -At $jittered -ErrorAction Stop
     }
     # 跑的是 silent-poll：先查签到状态、未签才补签，再跑成长中心。签到的机会因此
     # 从"一天一次"变成"一天七次"——00:05 那次撞上关机/睡眠/刚开机网络没就绪时，
@@ -161,8 +211,12 @@ try {
         if ($tasks.Count -ne 1) { throw "未找到唯一的计划任务：\$currentTask" }
         $info = Get-ScheduledTaskInfo -TaskName $currentTask -TaskPath "\" -ErrorAction Stop
         if ($null -eq $info) { throw "未读取到计划任务运行信息：\$currentTask" }
+        # 回读真实触发时刻：随机化之后写死「每天 00:05」就是在骗人
+        $at = @($tasks[0].Triggers | ForEach-Object {
+            if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
+        } | Sort-Object) -join ' / '
         $verifiedTasks += @{
-            Name = $row.Name; When = $row.When; What = $row.What
+            Name = $row.Name; When = $at; What = $row.What
             State = $tasks[0].State; NextRunTime = $info.NextRunTime
         }
     }
@@ -184,7 +238,9 @@ Write-Host " 完成" -ForegroundColor Green
 Write-Host ""
 Write-Host "两个定时任务已就位：" -ForegroundColor Green
 foreach ($row in $verifiedTasks) {
-    Write-Host ("  {0,-22} {1,-7} {2,-10} {3}" -f $row.Name, $row.State, $row.When, $row.What)
+    Write-Host ("  {0,-22} {1,-7} {2}" -f $row.Name, $row.State, $row.What)
+    # 触发时刻是随机生成的，单独一行，6 个点的列表不会把表格挤变形
+    Write-Host ("  {0,-22} 触发时刻 {1}" -f "", $row.When) -ForegroundColor DarkGray
     Write-Host ("  {0,-22} 下次运行 {1}" -f "", $row.NextRunTime) -ForegroundColor DarkGray
 }
 

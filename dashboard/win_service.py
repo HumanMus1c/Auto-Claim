@@ -2,12 +2,18 @@
 
 控制台把后台签到交给两个固定名称的 WorkBuddy 计划任务：
 
-  WorkBuddyAutoSignin  每天 00:05，完整签到 + 成长中心
-  WorkBuddyGrowthPoll  每天 01/05/09/13/17/21 点，补签 + 成长中心
+  WorkBuddyAutoSignin  每天 1 次（基准 00:05），完整签到 + 成长中心
+  WorkBuddyGrowthPoll  每天 6 次（基准 01/05/09/13/17/21 点），补签 + 成长中心
 
 Qoder CN 使用另一个独立任务，互不影响：
 
   QoderDailyCredits    每天 5 次（UTC+8 10:05 起），领取 100 Credits
+
+**触发时刻是随机的**：固定整点最容易被判定成脚本行为，所以每个基准点都会
+按 schedule_jitter 的三层系统熵源（系统时钟纳秒位、开机至今的分钟数、
+10 分钟倍数的其他系统事件）打散到 ±15 分钟内。任务每跑完一次就重排一次，
+每个点在它自己跑完的当天被换掉、第二天生效，因此第二天零点时整组时刻
+已经全部是新的。
 
 本模块只通过 PowerShell 的 ScheduledTasks 模块操作这些任务；任务名、
 触发器和动作全部来自下面的常量，前端不能传入任意命令。
@@ -28,12 +34,28 @@ import subprocess
 import sys
 import time
 
-# 与 install-windows.ps1 / README 中的任务保持一致
+try:
+    import schedule_jitter
+except ImportError:
+    # 冻结后 sys.path 不一定包含 dashboard/，按本文件位置补一次
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import schedule_jitter
+
+# 轮询基准点。随机化只在这些基准点附近浮动，不改变「一天覆盖 6 个时段」
+# 的结构。刻意用 6 个独立的 Daily 触发器，而不是「Daily + 每 4 小时重复」：
+# 后者一旦错过（关机/睡眠）就永久跳过，StartWhenAvailable 不会补跑。
+POLL_TIMES = ("01:00", "05:00", "09:00", "13:00", "17:00", "21:00")
+
+# 与 install-windows.ps1 / README 中的任务保持一致。
+# base_times 是随机化的锚点，实际注册的时刻由 _jittered_times() 生成；
+# forward=True 表示只允许向后浮动——第一个点往前漂会跨过午夜，被算进前一天。
 TASKS = (
     {
         "name": "WorkBuddyAutoSignin",
         "label": "每日签到",
-        "when": "每天 00:05",
+        "when": "每天 1 次",
+        "base_times": ("00:05",),
+        "forward": True,
         "what": "签到 + 成长中心",
         "action": "silent",
         "minutes": 10,
@@ -42,7 +64,9 @@ TASKS = (
     {
         "name": "WorkBuddyGrowthPoll",
         "label": "轮询补签",
-        "when": "每天 01/05/09/13/17/21 点",
+        "when": "每天 6 次",
+        "base_times": POLL_TIMES,
+        "forward": False,
         "what": "补签 + 成长中心全套",
         "action": "silent-poll",
         "minutes": 5,
@@ -56,7 +80,8 @@ QODER_TASKS = (
     {
         "name": "QoderDailyCredits",
         "label": "每日 Credits",
-        "when": "每天 5 次（UTC+8 10:05 起，按本机时间）",
+        "when": "每天 5 次",
+        "forward": True,
         "what": "查询并领取 Qoder CN 每日 100 Credits",
         "action": "silent",
         "minutes": 5,
@@ -75,7 +100,8 @@ TRAE_TASKS = (
     {
         "name": "TraeDailyCheckin",
         "label": "每日签到",
-        "when": "每天 5 次（08:05 起，按本机时间）",
+        "when": "每天 5 次",
+        "forward": True,
         "what": "多账号签到 + 剩余积分",
         "action": "silent",
         "minutes": 10,
@@ -89,15 +115,44 @@ TRAE_TASK_NAMES = tuple(TRAE_TASK_BY_NAME)
 TRAE_OFFSETS = (0, 2, 5, 9, 13)
 
 # Qoder 活动按 UTC+8 每天 10:00 刷新；主触发点晚 5 分钟，另排 4 次补跑。
+# 刷新有硬门槛，所以这类任务只做正向浮动（0~+15 分钟），绝不提前。
 QODER_OFFSETS = (0, 1, 5, 9, 13)
-
-# 轮询用 6 个独立的 Daily 触发器，而不是「Daily + 每 4 小时重复」。
-# 后者一旦错过（关机/睡眠）就永久跳过，StartWhenAvailable 不会补跑。
-POLL_TIMES = ("01:00", "05:00", "09:00", "13:00", "17:00", "21:00")
 
 ACTIONS = ("enable", "disable", "run", "stop", "uninstall")
 
 CREATE_NO_WINDOW = 0x08000000
+
+
+def random_times(spec):
+    """按 spec 的基准点生成一整套随机时刻（安装/修复时用）。
+
+    每个任务拿到的偏移互相独立；``forward=True`` 的任务只会向后浮动。
+    """
+    base = spec.get("base_times") or POLL_TIMES
+    return schedule_jitter.jitter_times(
+        base, spec["name"], forward=bool(spec.get("forward")))
+
+
+def _when_text(spec, times):
+    """卡片第一行的「什么时候跑」，带上实际时刻。
+
+    时刻是随机生成的，写死成「每天 00:05」就是在骗人——任务其实每天都不
+    在同一分钟醒。卡片宽度放不下 6 个时刻（`.svc-line` 是 nowrap + 省略号），
+    所以这里只露前两个，完整排期由前端放进 title。
+    """
+    label = spec.get("when") or ""
+    if not times:
+        return label
+    head = " / ".join(times[:2])
+    more = "" if len(times) <= 2 else " 等 %d 个时刻" % len(times)
+    return "%s（%s%s）" % (label, head, more)
+
+
+def _as_text_list(value):
+    """PowerShell 单元素数组可能退化成裸字符串，统一成列表。"""
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return [str(item) for item in value or [] if str(item).strip()]
 
 # 失败原因到「用户能照着做的一句话」的映射。
 # PowerShell 的原始报错（中文/英文/HRESULT）对普通用户毫无意义，界面卡片上
@@ -333,6 +388,10 @@ try {
         $actions = @($t.Actions | ForEach-Object {
             (($_.Execute) + ' ' + ($_.Arguments)).Trim()
         })
+        # 触发时刻是随机生成的，界面要显示真实排期而不是常量
+        $times = @($t.Triggers | ForEach-Object {
+            if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
+        } | Sort-Object)
         $tasks += [pscustomobject]@{
             name = $n
             installed = $true
@@ -342,6 +401,7 @@ try {
             next_run = $next
             last_result = $result
             action = ($actions -join '; ')
+            times = @($times)
         }
     }
     [pscustomobject]@{ ok = $true; tasks = $tasks } |
@@ -359,6 +419,7 @@ def _empty_tasks(specs=TASKS):
             "name": item["name"],
             "label": item["label"],
             "when": item["when"],
+            "times": [],
             "what": item["what"],
             "installed": False,
             "enabled": False,
@@ -402,7 +463,8 @@ def _normalize_status(raw, log_path=None, specs=TASKS):
         tasks.append({
             "name": name,
             "label": spec.get("label", name),
-            "when": spec.get("when", ""),
+            "when": _when_text(spec, _as_text_list(item.get("times"))),
+            "times": _as_text_list(item.get("times")),
             "what": spec.get("what", ""),
             "installed": installed,
             "enabled": enabled,
@@ -501,33 +563,23 @@ def _install_script(runner, prefix_args, workdir):
 
     for spec in TASKS:
         args = (base + " " + spec["action"]).strip()
+        times = random_times(spec)
         lines += [
             "    $a = New-ScheduledTaskAction -Execute $exe "
             "-Argument %s -WorkingDirectory $wd" % _ps_quote(args),
             "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
             "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
             "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
+            # 每个基准点各自随机，注册后时刻就固定下来，直到下次运行后的重排
+            "    $triggers = @()",
+            "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
+            "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
+            "    }",
+            "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
+            "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
+            "-Description %s -Force | Out-Null"
+            % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
         ]
-        if spec["name"] == "WorkBuddyGrowthPoll":
-            lines += [
-                "    $triggers = @()",
-                "    foreach ($hh in @(%s)) {"
-                % ",".join(_ps_quote(t) for t in POLL_TIMES),
-                "        $triggers += New-ScheduledTaskTrigger -Daily -At $hh",
-                "    }",
-                "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
-                "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
-                "-Description %s -Force | Out-Null"
-                % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
-            ]
-        else:
-            lines += [
-                "    $trigger = New-ScheduledTaskTrigger -Daily -At '00:05'",
-                "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
-                "-Action $a -Trigger $trigger -Settings $s -Principal $principal "
-                "-Description %s -Force | Out-Null"
-                % (_ps_quote(spec["name"]), _ps_quote(spec["description"])),
-            ]
 
     lines += [
         "    $verified = @()",
@@ -544,7 +596,7 @@ def _install_script(runner, prefix_args, workdir):
         "    }",
         "    [pscustomobject]@{",
         "        ok = $true",
-        "        message = '已安装并启用 2 个计划任务（WorkBuddyAutoSignin / WorkBuddyGrowthPoll）'",
+        "        message = '已安装并启用 2 个计划任务（WorkBuddyAutoSignin / WorkBuddyGrowthPoll），触发时刻已随机化'",
         "        tasks = $verified",
         "    } | ConvertTo-Json -Depth 5 -Compress",
         "} catch {",
@@ -573,6 +625,9 @@ def install(runner, prefix_args, workdir=None):
         detail = raw.get("error") or "安装失败"
         code, text = _classify(detail)
         raise ServiceError(text, code, detail=detail)
+    # 记下基准点，后续重排以它为锚（否则每天在上一天结果上再抽，会漂）
+    remember_base("workbuddy",
+                  {item["name"]: item["base_times"] for item in TASKS})
     return {
         "ok": True,
         "message": raw.get("message") or "已安装并启用计划任务",
@@ -677,18 +732,25 @@ def qoder_action(verb):
     return action(verb, QODER_TASKS)
 
 
-def qoder_trigger_times(now=None):
+def qoder_trigger_times(now=None, jitter=True):
     """把 UTC+8 每天 10:00 的刷新时间换算成本机 HH:mm 列表。
 
     与 install-qoder-windows.ps1 保持一致：主触发点 +5 分钟，再按
     0/1/5/9/13 小时排 4 次补跑。
+
+    ``jitter=True`` 时只做正向浮动：活动在刷新之后才能领，提前一分钟就是
+    空跑。``jitter=False`` 返回未打散的基准点，供测试与界面说明使用。
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
     reset = now.astimezone(datetime.timezone.utc).replace(
         hour=2, minute=0, second=0, microsecond=0)
     primary = reset.astimezone().replace(tzinfo=None) + datetime.timedelta(minutes=5)
-    return [(primary + datetime.timedelta(hours=h)).strftime("%H:%M")
-            for h in QODER_OFFSETS]
+    times = [(primary + datetime.timedelta(hours=h)).strftime("%H:%M")
+             for h in QODER_OFFSETS]
+    if not jitter:
+        return times
+    return schedule_jitter.jitter_times(times, QODER_TASKS[0]["name"],
+                                        forward=True)
 
 
 def trae_status(log_path=None):
@@ -701,8 +763,12 @@ def trae_action(verb):
     return action(verb, TRAE_TASKS)
 
 
-def trae_trigger_times(primary="08:05"):
-    """把设置里的主签到时间展开成 5 个本机触发时间。"""
+def trae_trigger_times(primary="08:05", jitter=True):
+    """把设置里的主签到时间展开成 5 个本机触发时间。
+
+    主时间由用户设置，抖动只往后放：往前漂可能跨过午夜，被算成前一天，
+    连着两天都会签不上。``jitter=False`` 返回未打散的基准点。
+    """
     try:
         base = datetime.datetime.strptime(str(primary or "08:05")[:5],
                                           "%H:%M")
@@ -712,7 +778,10 @@ def trae_trigger_times(primary="08:05"):
     for offset in TRAE_OFFSETS:
         moment = base + datetime.timedelta(hours=offset)
         times.append(moment.strftime("%H:%M"))
-    return times
+    if not jitter:
+        return times
+    return schedule_jitter.jitter_times(times, TRAE_TASKS[0]["name"],
+                                        forward=True)
 
 
 # python.org 安装器必写的位置；非默认目录安装也能从这里找到
@@ -974,20 +1043,455 @@ def install_qoder(signin_path, pythonw=None, workdir=None,
     退回控制台 exe 的 ``--qoder-service``（runner 由调用方给出，exe 内已
     打包解释器）。任务名、触发器和动作全部在服务端固定，前端不能传入任意命令。
     """
-    return _install_single_task("qoder_signin.py", signin_path,
-                                QODER_TASKS[0], qoder_trigger_times(),
-                                pythonw=pythonw, runner=runner,
-                                runner_args=runner_args, workdir=workdir)
+    # 基准与注册用的时刻从同一次换算里出，避免两次调用跨分钟导致对不上
+    base = qoder_trigger_times(jitter=False)
+    times = schedule_jitter.jitter_times(base, QODER_TASKS[0]["name"],
+                                         forward=True)
+    result = _install_single_task("qoder_signin.py", signin_path,
+                                  QODER_TASKS[0], times,
+                                  pythonw=pythonw, runner=runner,
+                                  runner_args=runner_args, workdir=workdir)
+    remember_base("qoder", {QODER_TASKS[0]["name"]: base})
+    return result
 
 
-def install_trae(signin_path, times=None, pythonw=None, workdir=None,
-                 runner=None, runner_args=None):
+def install_trae(signin_path, base_times=None, times=None, pythonw=None,
+                 workdir=None, runner=None, runner_args=None):
     """注册/修复 TraeDailyCheckin，并回读确认。
 
-    与 Qoder 同一套流程：pythonw 优先，控制台 exe 兜底。
+    与 Qoder 同一套流程：pythonw 优先，控制台 exe 兜底。``base_times`` 是
+    配置出来的基准点（主时间随 Trae 设置变），重排以它为锚；``times`` 不通
+    常用，传了就直接注册。
     """
-    return _install_single_task("trae_signin.py", signin_path,
-                                TRAE_TASKS[0],
-                                times or trae_trigger_times(),
-                                pythonw=pythonw, runner=runner,
-                                runner_args=runner_args, workdir=workdir)
+    base = list(base_times or trae_trigger_times(jitter=False))
+    if times is None:
+        times = schedule_jitter.jitter_times(base, TRAE_TASKS[0]["name"],
+                                             forward=True)
+    result = _install_single_task("trae_signin.py", signin_path,
+                                  TRAE_TASKS[0], times,
+                                  pythonw=pythonw, runner=runner,
+                                  runner_args=runner_args, workdir=workdir)
+    remember_base("trae", {TRAE_TASKS[0]["name"]: base})
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 触发时刻的随机重排
+# ---------------------------------------------------------------------------
+#
+# 安装时的随机只能决定「这一次」的时刻；Daily 触发器一旦写进任务计划，
+# 往后每天都会在同一分钟醒来，几天之后模式又固定了。所以任务每次跑完都
+# 重排一次：把「今天已经过去」的点重新抽样，未到的点不动。
+#
+# 未到的点保留是有意的——poll 任务凌晨跑完就把 05/09/13 一起换掉的话，
+# 白天那几个点会被推到已经过去的时段，当天直接少跑 5 次。而每个点在它
+# 自己跑完的当天都会被换掉，所以到第二天零点，整组时刻已经全是新的。
+#
+# 重排是尽力而为：任务计划的读写在后台发生，任何失败都只记录、不抛错，
+# 绝不能让「换个随机时间」把签到本身搞挂。
+#
+# 去重只在**同一个进程内**做，不按时间冷却。早期版本用 90 分钟冷却，结果
+# 「手动运行一次」会把第二天的随机时刻锁死 90 分钟——用户要的是「每跑完
+# 一次就换一组」，而不是「每 90 分钟最多换一次」。同一进程里重复调用的
+# 场景只有一个：控制台 exe 的 --qoder-service / --trae-service 先跑脚本
+# 自己的钩子，再回到 _side_service_main 调一次，两次间隔不到一秒。
+
+RESHUFFLED_IN_PROCESS = set()
+JITTER_STATE_FILE = "schedule-jitter.json"
+
+RESHUFFLE_TABLES = {
+    "workbuddy": TASKS,
+    "qoder": QODER_TASKS,
+    "trae": TRAE_TASKS,
+}
+
+
+def default_data_dir():
+    """重排状态的落盘目录，与控制台的 _diag_dir() 保持同一路径。"""
+    base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "Auto-Claim", "dashboard")
+
+
+def jitter_state_path(data_dir=None):
+    return os.path.join(data_dir or default_data_dir(), JITTER_STATE_FILE)
+
+
+def read_jitter_state(data_dir=None):
+    """读取各类任务上次重排的时间戳；文件缺失或损坏都当作空状态。"""
+    try:
+        with open(jitter_state_path(data_dir), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_jitter_state(data_dir, state):
+    """原子写回：先写临时文件再替换，断电不会留下半份 JSON。"""
+    path = jitter_state_path(data_dir)
+    temp = path + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(temp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, ensure_ascii=False, indent=2)
+        os.replace(temp, path)
+    except OSError:
+        try:
+            os.remove(temp)
+        except Exception:
+            pass
+
+
+def _state_entry(state, kind):
+    """取某一类任务的状态项，兼容早期「裸时间戳」的写法。"""
+    entry = state.get(kind)
+    if isinstance(entry, dict):
+        return dict(entry)
+    if isinstance(entry, (int, float)):
+        return {"at": float(entry)}
+    return {}
+
+
+def remember_base(kind, mapping, data_dir=None):
+    """记下这次注册用的基准点。
+
+    重排必须以基准为锚：早期版本拿任务里的当前时刻再抽 ±15 分钟，误差会
+    随天数滚雪球（00:20 → 00:25 → 00:40 → 00:57 …），一个月就漂到白天。
+    基准点只有安装时才知道（Trae 的主时间还随设置变），所以在这里留一份。
+    """
+    state = read_jitter_state(data_dir)
+    entry = _state_entry(state, kind)
+    base = dict(entry.get("base") or {})
+    base.update({name: list(times) for name, times in mapping.items()})
+    entry["base"] = base
+    state[kind] = entry
+    write_jitter_state(data_dir, state)
+
+
+def _read_times_script(specs):
+    """读出任务真实的触发时刻与动作，供重排复用。
+
+    动作从任务本身读，而不是按当前环境重新推导：任务可能是用系统 Python
+    装的，也可能指向控制台 exe，重排只负责换时间，不该顺手把运行方式也改掉。
+    """
+    names = ",".join(_ps_quote(item["name"]) for item in specs)
+    return _PREAMBLE + r"""
+try {
+    $out = @()
+    foreach ($n in @(%s)) {
+        $t = Get-ScheduledTask -TaskName $n -TaskPath '\' -ErrorAction SilentlyContinue
+        if ($null -eq $t) { continue }
+        $act = @($t.Actions)[0]
+        if ($null -eq $act) { continue }
+        $times = @($t.Triggers | ForEach-Object {
+            if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
+        } | Sort-Object)
+        $out += [pscustomobject]@{
+            name = $n
+            times = @($times)
+            exe = [string]$act.Execute
+            args = [string]$act.Arguments
+            workdir = [string]$act.WorkingDirectory
+        }
+    }
+    [pscustomobject]@{ ok = $true; tasks = @($out) } |
+        ConvertTo-Json -Depth 6 -Compress
+} catch {
+    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } |
+        ConvertTo-Json -Compress
+}
+""" % names
+
+
+def _rewrite_times_script(changes):
+    """用新的触发时刻重新注册同名任务，动作与设置保持原样。
+
+    参数走 base64 传，避免路径里的引号、中文和反斜杠在 PowerShell 里
+    层层转义；报错几乎都出在这一步。
+    """
+    payload = json.dumps(changes, ensure_ascii=False)
+    encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    return _PREAMBLE + r"""
+try {
+    $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+    $json = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('%s'))
+    # 不能写成 @($json | ConvertFrom-Json)：PowerShell 5.1 的 ConvertFrom-Json
+    # 把整个 JSON 数组当成「一个」对象送进管道，@() 再包一层就成了嵌套数组，
+    # foreach 只转一圈、$item.exe 取到的是所有路径拼成的数组，报
+    # 「无法将值转换为类型 System.String」。先赋值、再在 foreach 里包 @()。
+    $items = $json | ConvertFrom-Json
+    $done = @()
+    foreach ($item in @($items)) {
+        $triggers = @()
+        foreach ($t in @($item.times)) {
+            $triggers += New-ScheduledTaskTrigger -Daily -At $t
+        }
+        if ($item.workdir) {
+            $a = New-ScheduledTaskAction -Execute $item.exe -Argument $item.args -WorkingDirectory $item.workdir
+        } else {
+            $a = New-ScheduledTaskAction -Execute $item.exe -Argument $item.args
+        }
+        $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes ([int]$item.minutes))
+        Register-ScheduledTask -TaskName $item.name -TaskPath '\' -Action $a -Trigger $triggers -Settings $s -Principal $principal -Description $item.description -Force | Out-Null
+        $done += $item.name
+    }
+    [pscustomobject]@{ ok = $true; tasks = @($done) } |
+        ConvertTo-Json -Depth 5 -Compress
+} catch {
+    [pscustomobject]@{ ok = $false; error = $_.Exception.Message } |
+        ConvertTo-Json -Compress
+}
+""" % encoded
+
+
+def _norm_path(value):
+    """空串原样返回；其余转成当前系统的标准写法（反斜杠）。"""
+    text = "" if value is None else str(value).strip()
+    return os.path.normpath(text) if text else ""
+
+
+def _run_ps_json(script, timeout=40):
+    """执行 PowerShell 并把 JSON 结果解出来；失败统一抛 ServiceError。"""
+    raw = _parse_json(_run_ps(script, timeout=timeout))
+    if not isinstance(raw, dict):
+        raise ServiceError("PowerShell 返回无法解析", "ps-failed")
+    if not raw.get("ok"):
+        detail = raw.get("error") or "计划任务操作失败"
+        code, message = _classify(detail)
+        raise ServiceError(message, code, detail=detail)
+    return raw
+
+
+def _as_task_list(raw):
+    """PowerShell 5.1 会把单元素数组序列化成对象，这里统一成列表。"""
+    items = raw.get("tasks") or []
+    if isinstance(items, dict):
+        return [items]
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _reshuffle_error(message):
+    return {"ok": False, "error": message, "changed": []}
+
+
+def reshuffle(kind, data_dir=None, now=None, force=False):
+    """签到跑完后重排触发时刻；返回可直接写进日志的小结。
+
+    ``kind`` 取 ``workbuddy`` / ``qoder`` / ``trae``。同一个进程内只重排一次
+    （见 ``RESHUFFLED_IN_PROCESS``）；``force=True`` 供「安装 / 修复」后
+    立即重排，也用来在同一个进程里重复验证。
+    """
+    if not supported():
+        return _reshuffle_error("计划任务管理仅支持 Windows")
+    specs = RESHUFFLE_TABLES.get(kind)
+    if not specs:
+        return _reshuffle_error("未知的计划任务类型：%s" % kind)
+    if kind in RESHUFFLED_IN_PROCESS and not force:
+        return {"ok": True, "changed": [], "skipped": "in-process"}
+
+    now = now or datetime.datetime.now()
+    state = read_jitter_state(data_dir)
+    entry = _state_entry(state, kind)
+    bases = entry.get("base") or {}
+
+    by_name = {item["name"]: item for item in specs}
+    changes = []
+    summary = []
+    try:
+        raw = _run_ps_json(_read_times_script(specs), timeout=30)
+        for item in _as_task_list(raw):
+            spec = by_name.get(item.get("name"))
+            if spec is None:
+                continue
+            old = [t for t in _as_text_list(item.get("times"))
+                   if schedule_jitter.parse_hhmm(t) is not None]
+            if not old:
+                # 读不到 StartBoundary（任务被手工改成登录触发之类），不去动它
+                continue
+            base = bases.get(spec["name"]) or spec.get("base_times")
+            new = schedule_jitter.reshuffle(
+                old, spec["name"], base=base, now=now,
+                forward=bool(spec.get("forward")))
+            if new == old:
+                continue
+            changes.append({
+                "name": spec["name"],
+                # 任务里的路径可能是正斜杠（手工改过、或从别的工具写入），
+                # 统一成 Windows 形式，免得同一批任务里两种写法混着
+                "exe": _norm_path(item.get("exe")),
+                "args": item.get("args") or "",
+                "workdir": _norm_path(item.get("workdir")),
+                "minutes": int(spec.get("minutes") or 10),
+                "description": spec.get("description") or "",
+                "times": new,
+            })
+            summary.append({"name": spec["name"], "old": old, "new": new})
+        if changes:
+            _run_ps_json(_rewrite_times_script(changes), timeout=60)
+    except Exception as exc:
+        return {"ok": False, "changed": [], "error": "%s" % exc}
+
+    # 无论有没有改动都记一次时间戳：没改说明这轮无需重排，同一进程内不必再读
+    entry["at"] = time.time()
+    state[kind] = entry
+    write_jitter_state(data_dir, state)
+    RESHUFFLED_IN_PROCESS.add(kind)
+    if not changes:
+        return {"ok": True, "changed": [], "skipped": "unchanged"}
+    return {"ok": True, "changed": summary}
+
+def apply_jitter_after_run(kind, data_dir=None):
+    """在签到流程末尾调用：重排并把结果写进日志，永不抛错。"""
+    if not supported():
+        # macOS 走 launchd，没有可重排的 Daily 触发器，静默跳过
+        return {"ok": True, "changed": [], "skipped": "unsupported"}
+    try:
+        outcome = reshuffle(kind, data_dir=data_dir)
+    except Exception as exc:
+        outcome = {"ok": False, "changed": [], "error": "%s" % exc}
+    if outcome.get("changed"):
+        preview = "; ".join(
+            "%s %s→%s" % (item["name"], "/".join(item["old"]),
+                          "/".join(item["new"]))
+            for item in outcome["changed"])
+        _append_console_log(
+            "[jitter] %s 触发时刻已重排：%s" % (kind, preview), data_dir)
+    elif not outcome.get("ok"):
+        _append_console_log("[jitter] %s 重排失败：%s"
+                            % (kind, outcome.get("error")), data_dir)
+    return outcome
+
+
+def _append_console_log(text, data_dir=None):
+    """重排结果写进控制台日志；没有控制台（pythonw）时静默丢弃。
+
+    这里刻意不 import app.py 的日志函数：win_service 被 Qoder / Trae 脚本
+    单独 import 时不一定会加载控制台，反向依赖会绕成环。
+    """
+    try:
+        path = os.path.join(data_dir or default_data_dir(), "run.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("%s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), text))
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# 计划任务失败记录
+# ---------------------------------------------------------------------------
+#
+# 计划任务在后台跑，失败时没人看见——日志里躺着「没有会话 Cookie 可续期」，
+# 但用户不会主动去翻。这里把每次失败写进一份 JSON，控制台启动和轮询时读取，
+# 在对应模块（WorkBuddy / Qoder / Trae）的计划任务区块原样展示。
+#
+# 为什么不复用 signin.log：三个产品各有自己的日志文件，格式也不一样
+# （有的写 JSON、有的写文本），界面要同时展示「哪次失败、重试结果如何」，
+# 需要结构化字段。日志仍然照写，两边不冲突。
+
+ALERT_FILENAME = "service-alert.json"
+ALERT_KINDS = ("workbuddy", "qoder", "trae")
+ALERT_REPORT_LIMIT = 800       # 单条原文上限，避免整份响应写进文件
+
+# 界面会直接显示的字段。其余（账号列表、原始 payload）一律不落盘。
+_ALERT_FIELDS = ("task", "action", "exit", "result", "report", "stage",
+                 "reimport_ok", "reimport_report", "retry_exit",
+                 "retry_report", "recovered", "surface", "surface_at")
+_ALERT_NUMBERS = ("exit", "retry_exit", "surface_at")
+
+
+def alert_path(data_dir):
+    """失败记录文件路径；data_dir 由控制台传 _diag_dir()。"""
+    return os.path.join(data_dir, ALERT_FILENAME)
+
+
+def _alert_text(value, limit=ALERT_REPORT_LIMIT):
+    text = "" if value is None else str(value)
+    text = " ".join(text.split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _normalize_alert(item):
+    kind = str(item.get("kind") or "")
+    if kind not in ALERT_KINDS:
+        raise ValueError("未知的计划任务类型：%s" % kind)
+    out = {"kind": kind,
+           "at": item.get("at") or time.strftime("%Y-%m-%d %H:%M:%S")}
+    for key in _ALERT_FIELDS:
+        if key not in item:
+            continue
+        value = item[key]
+        if isinstance(value, bool):
+            out[key] = value
+        elif isinstance(value, (int, float)) and key in _ALERT_NUMBERS:
+            out[key] = value
+        elif value is not None:
+            out[key] = _alert_text(value)
+    if "surface" in out:
+        out["surface"] = out["surface"][:40]
+    return out
+
+
+def read_alerts(data_dir):
+    """读取全部失败记录；文件缺失或损坏都返回空列表。
+
+    损坏时不能抛异常：这个函数在控制台启动路径上，一条写坏的 JSON 不该
+    让整个界面起不来。
+    """
+    try:
+        with open(alert_path(data_dir), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return []
+    return [item for item in items
+            if isinstance(item, dict) and item.get("kind") in ALERT_KINDS]
+
+
+def write_alert(data_dir, item):
+    """写入或替换同类记录：一个模块只显示一条最新提示。
+
+    用「写临时文件 + os.replace」：控制台可能正好在轮询，读到半截 JSON
+    会把它当成损坏文件，提示直接消失。
+    """
+    record = _normalize_alert(item)
+    others = [old for old in read_alerts(data_dir)
+              if old.get("kind") != record["kind"]]
+    items = [record] + others
+
+    path = alert_path(data_dir)
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"version": 1, "items": items}, fh,
+                  ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    return record
+
+
+def clear_alert(data_dir, kind):
+    """用户点「知道了」后清掉该类型的提示；返回是否真的有记录。"""
+    if kind not in ALERT_KINDS:
+        raise ValueError("未知的计划任务类型：%s" % kind)
+    items = read_alerts(data_dir)
+    kept = [item for item in items if item.get("kind") != kind]
+    if len(kept) == len(items):
+        return False
+    path = alert_path(data_dir)
+    try:
+        if kept:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"version": 1, "items": kept}, fh,
+                          ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
+        else:
+            os.remove(path)
+    except OSError:
+        return False
+    return True

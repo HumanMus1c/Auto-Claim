@@ -101,6 +101,49 @@ Write-Host " $signin" -ForegroundColor Green
 Write-Host "[3/3] 创建定时任务 ..." -NoNewline
 $taskName = "QoderDailyCredits"
 
+# 触发时刻的随机化：与控制台里的 schedule_jitter.py 同构，三层系统熵源叠加。
+# 固定整点最容易被判定成脚本行为，这里把每个基准点打散到窗口内。
+# Qoder 有硬门槛——活动刷新之后才能领——所以只做正向浮动（Forward），
+# 提前一分钟就是空跑。
+function Get-JitteredTime {
+    param(
+        [Parameter(Mandatory = $true)][string]$Base,
+        [Parameter(Mandatory = $true)][string]$TaskName,
+        [int]$Window = 900,
+        [switch]$Forward
+    )
+
+    $ticks = (Get-Date).Ticks
+    $bootMs = 0
+    try { $bootMs = [Environment]::TickCount64 } catch { $bootMs = [Environment]::TickCount }
+    $bootMinute = [int64]($bootMs / 60000)
+    $epochSlot = [int64]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() / 600)
+    $uptimeSlot = [int64]($bootMinute / 10)
+
+    $seed = "$TaskName|$($ticks % 1000000000)|$bootMinute|$epochSlot|$uptimeSlot"
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($seed))
+    } finally {
+        $sha.Dispose()
+    }
+    $value = [BitConverter]::ToUInt32($hash, 0)
+
+    # 以分钟为粒度且跳过 0：偏移 0 等于没打散，触发器又只精确到 HH:mm。
+    $span = [int]($Window / 60)
+    if ($span -lt 1) { $span = 1 }
+    if ($Forward) {
+        $minutes = ($value % $span) + 1
+    } else {
+        $slot = $value % (2 * $span)
+        if ($slot -lt $span) { $minutes = $slot - $span }
+        else { $minutes = $slot - $span + 1 }
+    }
+
+    $baseTime = [datetime]::ParseExact($Base, 'HH:mm', $null)
+    return $baseTime.AddSeconds($minutes * 60).ToString('HH:mm')
+}
+
 # 活动按 UTC+8 每天 10:00 刷新。先换算成本机时间，再加 5 分钟；
 # 后面四个补跑点用来兜住「10:05 时活动还没下发 / 网络没就绪 / 机器刚开机」。
 $resetUtc = [datetime]::SpecifyKind([datetime]::UtcNow.Date.AddHours(2), [DateTimeKind]::Utc)
@@ -108,6 +151,9 @@ $primary  = $resetUtc.ToLocalTime().AddMinutes(5)
 $offsets  = @(0, 1, 5, 9, 13)
 $times    = @()
 foreach ($h in $offsets) { $times += $primary.AddHours($h).ToString("HH:mm") }
+$times    = @($times | ForEach-Object {
+    Get-JitteredTime -Base $_ -TaskName $taskName -Forward
+})
 
 $operation = "创建"
 try {
