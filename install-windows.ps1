@@ -11,7 +11,7 @@
 #     powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
 #
 # 会创建两个定时任务（触发时刻随机，不再固定整点）：
-#   1) WorkBuddyAutoSignin   每天 1 次   基准 00:05，随机延后最多 15 分钟
+#   1) WorkBuddyAutoSignin   每天 7 次   基准 00:05/03:00/07:00/11:00/15:00/19:00/23:00
 #   2) WorkBuddyGrowthPoll   每天 6 次   基准 01/05/09/13/17/21 点，各 ±15 分钟
 #
 # 两者都零 Token、无窗口、开机错过会自动补跑。
@@ -149,7 +149,7 @@ function Get-JitteredTime {
 }
 
 $taskRows = @(
-    @{ Name = "WorkBuddyAutoSignin"; When = "每天 1 次（随机时刻）"; What = "签到 + 成长中心" },
+    @{ Name = "WorkBuddyAutoSignin"; When = "每天 7 次（随机时刻）"; What = "签到 + 成长中心" },
     @{ Name = "WorkBuddyGrowthPoll"; When = "每天 6 次（随机时刻）"; What = "补签 + 成长中心全套" }
 )
 $registeredTasks = @()
@@ -167,10 +167,16 @@ try {
     $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive `
         -RunLevel Limited -ErrorAction Stop
 
-    # 任务 1：每日签到（基准 00:05，随机延后最多 15 分钟）
+    # 任务 1：每日签到（7 个基准点，覆盖整天，各自随机延后最多 15 分钟）
+    # 签到在 UTC+8 00:00 重置，只压在凌晨的话电脑一睡过去当天就没机会了。
+    # 每 4 小时一个点，正好落在下面轮询任务（01/05/09/13/17/21）的间隙中间：
+    # 两个任务合起来是「每 2 小时一次」的均匀覆盖。
     $act1 = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$signin`" silent" -ErrorAction Stop
-    $at1 = Get-JitteredTime -Base "00:05" -TaskName "WorkBuddyAutoSignin" -Forward
-    $tri1 = New-ScheduledTaskTrigger -Daily -At $at1 -ErrorAction Stop
+    $tri1 = @()
+    foreach ($hh in @("00:05", "03:00", "07:00", "11:00", "15:00", "19:00", "23:00")) {
+        $jittered = Get-JitteredTime -Base $hh -TaskName "WorkBuddyAutoSignin" -Forward
+        $tri1 += New-ScheduledTaskTrigger -Daily -At $jittered -ErrorAction Stop
+    }
     $set1 = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden `
             -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries `
             -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -ErrorAction Stop

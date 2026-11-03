@@ -143,7 +143,7 @@ class QoderTaskTest(unittest.TestCase):
                     for h in win_service.QODER_OFFSETS]
         self.assertEqual(times, [t.astimezone().strftime("%H:%M")
                                  for t in expected])
-        self.assertEqual(len(times), 5)
+        self.assertEqual(len(times), len(win_service.QODER_OFFSETS))
 
     def test_trigger_times_only_shift_forward(self):
         """Qoder 有「刷新之后才能领」的硬门槛，抖动不能提前。"""
@@ -192,12 +192,21 @@ class TraeTaskTest(unittest.TestCase):
     def test_trae_trigger_times_expand_offsets(self):
         times = win_service.trae_trigger_times("08:05", jitter=False)
         self.assertEqual(times,
-                         ["08:05", "10:05", "13:05", "17:05", "21:05"])
+                         ["08:05", "09:05", "11:05", "13:05",
+                          "15:05", "17:05", "19:05", "21:05"])
 
     def test_trae_trigger_times_wrap_past_midnight(self):
         times = win_service.trae_trigger_times("22:30", jitter=False)
         self.assertEqual(times,
-                         ["22:30", "00:30", "03:30", "07:30", "11:30"])
+                         ["22:30", "23:30", "01:30", "03:30",
+                          "05:30", "07:30", "09:30", "11:30"])
+
+    def test_trae_trigger_times_cover_the_day(self):
+        """间隔不超过 2 小时：睡一觉最多连丢一两个点，醒来很快能补上。"""
+        minutes = [win_service.schedule_jitter.parse_hhmm(t)
+                   for t in win_service.trae_trigger_times("08:05", jitter=False)]
+        for left, right in zip(minutes, minutes[1:]):
+            self.assertLessEqual(right - left, 120)
 
     def test_trae_trigger_times_fall_back_on_invalid_input(self):
         self.assertEqual(win_service.trae_trigger_times("oops", jitter=False),
@@ -224,6 +233,49 @@ class TraeTaskTest(unittest.TestCase):
                 self.assertLessEqual(
                     abs(shifted - base),
                     win_service.schedule_jitter.JITTER_WINDOW // 60)
+
+
+class ScheduleDensityTest(unittest.TestCase):
+    """每个模块一天都要有多个点：电脑睡过去不能把当天唯一的机会睡没。"""
+
+    def test_workbuddy_signin_has_multiple_points(self):
+        self.assertGreaterEqual(len(win_service.SIGNIN_TIMES), 6)
+        minutes = [win_service.schedule_jitter.parse_hhmm(t)
+                   for t in win_service.SIGNIN_TIMES]
+        self.assertNotIn(None, minutes)
+        for left, right in zip(minutes, minutes[1:]):
+            self.assertLessEqual(right - left, 4 * 60)
+
+    def test_workbuddy_covers_the_whole_day(self):
+        """签到点要贯穿 0~24 点，不能只堆在凌晨；合并轮询点后不留大空档。"""
+        minutes = [win_service.schedule_jitter.parse_hhmm(t)
+                   for t in win_service.SIGNIN_TIMES]
+        self.assertLessEqual(minutes[0], 30)
+        self.assertGreaterEqual(minutes[-1], 22 * 60)
+        merged = sorted(minutes + [
+            win_service.schedule_jitter.parse_hhmm(t)
+            for t in win_service.POLL_TIMES])
+        gaps = [right - left for left, right in zip(merged, merged[1:])]
+        self.assertLessEqual(max(gaps), 2 * 60)
+
+    def test_qoder_and_trae_points_are_no_more_than_two_hours_apart(self):
+        for offsets in (win_service.QODER_OFFSETS, win_service.TRAE_OFFSETS):
+            self.assertGreaterEqual(len(offsets), 6)
+            for left, right in zip(offsets, offsets[1:]):
+                self.assertLessEqual(right - left, 2)
+
+    def test_when_label_matches_point_count(self):
+        """卡片文案的次数必须和实际点数一致——改了点位忘了改文案就是在骗人。"""
+        for spec in win_service.TASKS:
+            self.assertIn("%d 次" % len(spec["base_times"]), spec["when"])
+        self.assertIn("%d 次" % len(win_service.QODER_OFFSETS),
+                      win_service.QODER_TASKS[0]["when"])
+        self.assertIn("%d 次" % len(win_service.TRAE_OFFSETS),
+                      win_service.TRAE_TASKS[0]["when"])
+
+    def test_poll_times_stay_four_hours_apart(self):
+        """轮询是补签兜底，间隔由 6 个固定时段保证，不跟着加密。"""
+        self.assertEqual(len(win_service.POLL_TIMES), 6)
 
 
 class AlertStoreTest(unittest.TestCase):

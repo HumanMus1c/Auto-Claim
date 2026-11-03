@@ -72,13 +72,17 @@ class OffsetTest(unittest.TestCase):
             self.assertLessEqual(offset, schedule_jitter.JITTER_WINDOW)
 
     def test_offsets_differ_between_points_and_days(self):
-        """同一天不同点、同一点不同天，都不该拿到同一个偏移。"""
-        same_day = {schedule_jitter.offset_seconds("task#%d" % i, "2026-11-02")
-                    for i in range(12)}
-        self.assertGreater(len(same_day), 6)
-        across_days = {schedule_jitter.offset_seconds("task#0", "2026-11-%02d" % d)
-                       for d in range(1, 15)}
-        self.assertGreater(len(across_days), 9)
+        """同一天不同点、同一点不同天，都不该退化成同一个偏移。
+
+        值域只有 30 个，抽样必然有重复，所以只验证「不同值占相当比例」——
+        用固定阈值（样本数的 1/3）而不是精确计数，避免测试本身变成概率题。
+        """
+        same_day = [schedule_jitter.offset_seconds("task#%d" % i, "2026-11-02")
+                    for i in range(30)]
+        self.assertGreater(len(set(same_day)), len(same_day) // 3)
+        across_days = [schedule_jitter.offset_seconds("task#0", "2026-%02d-%02d" % (m, d))
+                       for m in (1, 2, 3) for d in range(1, 11)]
+        self.assertGreater(len(set(across_days)), len(across_days) // 3)
 
     def test_same_entropy_is_reproducible(self):
         """熵源固定时结果必须一致，否则重排会变成每次运行都改一次。"""

@@ -46,15 +46,23 @@ except ImportError:
 # 后者一旦错过（关机/睡眠）就永久跳过，StartWhenAvailable 不会补跑。
 POLL_TIMES = ("01:00", "05:00", "09:00", "13:00", "17:00", "21:00")
 
+# 每日签到的基准点：覆盖整天，而不是只压在凌晨。
+# 签到在 UTC+8 00:00 重置，只有 00:05 一个点时电脑一睡过去当天就没机会了。
+# 这里每 4 小时一个点，正好落在轮询任务（01/05/09/13/17/21）的间隙中点上，
+# 两个任务合起来是「每 2 小时一次」的均匀覆盖：
+#   00:05 01:00 03:00 05:00 07:00 09:00 11:00 13:00 15:00 17:00 19:00 21:00 23:00
+SIGNIN_TIMES = ("00:05", "03:00", "07:00", "11:00",
+                "15:00", "19:00", "23:00")
+
 # 与 install-windows.ps1 / README 中的任务保持一致。
-# base_times 是随机化的锚点，实际注册的时刻由 _jittered_times() 生成；
+# base_times 是随机化的锚点，实际注册的时刻由 random_times() 生成；
 # forward=True 表示只允许向后浮动——第一个点往前漂会跨过午夜，被算进前一天。
 TASKS = (
     {
         "name": "WorkBuddyAutoSignin",
         "label": "每日签到",
-        "when": "每天 1 次",
-        "base_times": ("00:05",),
+        "when": "每天 7 次",
+        "base_times": SIGNIN_TIMES,
         "forward": True,
         "what": "签到 + 成长中心",
         "action": "silent",
@@ -80,7 +88,7 @@ QODER_TASKS = (
     {
         "name": "QoderDailyCredits",
         "label": "每日 Credits",
-        "when": "每天 5 次",
+        "when": "每天 8 次",
         "forward": True,
         "what": "查询并领取 Qoder CN 每日 100 Credits",
         "action": "silent",
@@ -94,13 +102,13 @@ TASK_NAMES = tuple(TASK_BY_NAME)
 QODER_TASK_BY_NAME = {item["name"]: item for item in QODER_TASKS}
 QODER_TASK_NAMES = tuple(QODER_TASK_BY_NAME)
 
-# Trae 多账号签到独立任务；触发点由 trae_trigger_times() 按设置里的
-# 主时间生成，默认 08:05 起再补跑 4 次，覆盖漏签/睡眠唤醒。
+# Trae 多账号签到独立任务；触发点由 trae_trigger_times() 按设置里的主时间
+# 展开，默认 08:05 起每 1~2 小时一次，覆盖到晚上。
 TRAE_TASKS = (
     {
         "name": "TraeDailyCheckin",
         "label": "每日签到",
-        "when": "每天 5 次",
+        "when": "每天 8 次",
         "forward": True,
         "what": "多账号签到 + 剩余积分",
         "action": "silent",
@@ -111,12 +119,13 @@ TRAE_TASKS = (
 TRAE_TASK_BY_NAME = {item["name"]: item for item in TRAE_TASKS}
 TRAE_TASK_NAMES = tuple(TRAE_TASK_BY_NAME)
 
-# 主触发点之后的小时偏移：+2/+5/+9/+13，覆盖白天与晚间
-TRAE_OFFSETS = (0, 2, 5, 9, 13)
+# 主触发点之后的小时偏移。间隔控制在 1~2 小时：睡眠错过一两个点也能在醒来
+# 后一小时内补上，不依赖 StartWhenAvailable 的「只补最近一次」。
+TRAE_OFFSETS = (0, 1, 3, 5, 7, 9, 11, 13)
 
-# Qoder 活动按 UTC+8 每天 10:00 刷新；主触发点晚 5 分钟，另排 4 次补跑。
-# 刷新有硬门槛，所以这类任务只做正向浮动（0~+15 分钟），绝不提前。
-QODER_OFFSETS = (0, 1, 5, 9, 13)
+# Qoder 活动按 UTC+8 每天 10:00 刷新，刷新前签了也领不到，所以基准点从
+# 刷新 +5 分钟开始往后再排 7 次。刷新有硬门槛，只做正向浮动、绝不提前。
+QODER_OFFSETS = (0, 1, 3, 5, 7, 9, 11, 13)
 
 ACTIONS = ("enable", "disable", "run", "stop", "uninstall")
 

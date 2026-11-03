@@ -145,10 +145,11 @@ function Get-JitteredTime {
 }
 
 # 活动按 UTC+8 每天 10:00 刷新。先换算成本机时间，再加 5 分钟；
-# 后面四个补跑点用来兜住「10:05 时活动还没下发 / 网络没就绪 / 机器刚开机」。
+# 之后每 1~2 小时补一个点：刷新前签了也领不到，所以全部排在刷新之后，
+# 间隔控制在 2 小时内，睡眠错过一两个点也能很快补上。
 $resetUtc = [datetime]::SpecifyKind([datetime]::UtcNow.Date.AddHours(2), [DateTimeKind]::Utc)
 $primary  = $resetUtc.ToLocalTime().AddMinutes(5)
-$offsets  = @(0, 1, 5, 9, 13)
+$offsets  = @(0, 1, 3, 5, 7, 9, 11, 13)
 $times    = @()
 foreach ($h in $offsets) { $times += $primary.AddHours($h).ToString("HH:mm") }
 $times    = @($times | ForEach-Object {
