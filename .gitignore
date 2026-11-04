@@ -37,3 +37,10 @@ update-and-build.log
 update-and-build.log.*.txt
 AutoClaimUpdateBuild.xml
 register-task.bat
+
+# 本地测试脚本：只保留工作区，不纳入版本控制。
+# 新建测试文件请直接使用 test_*.py / test_*.js 等命名，Git 会自动忽略。
+test_*.py
+test_*.js
+*_test.py
+*.test.js
