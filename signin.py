@@ -31,6 +31,9 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
   python signin.py status         # 仅查签到状态（调试）
   python signin.py claim          # 仅领取签到（调试，幂等）
   python signin.py all            # 查签到状态 + 领取（调试）
+
+计划任务使用的 silent* 动作会在开始前检查 WorkBuddy 是否在运行；未运行则
+以隐藏窗口方式拉起并隐藏到托盘。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可关闭。
 """
 
 import base64
@@ -51,6 +54,11 @@ import urllib.parse
 import uuid
 from contextlib import closing
 from datetime import date, datetime
+
+try:
+    import client_launcher
+except Exception:  # 单独拷走 signin.py 时仍可运行，只是不会自动拉起客户端
+    client_launcher = None
 
 DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
@@ -427,6 +435,27 @@ def find_workbuddy_runtime():
         if registered:
             return registered
     raise AuthError("RUNTIME_NOT_FOUND")
+
+
+def _ensure_client_running():
+    """计划任务开始前尽量把 WorkBuddy 拉起来并隐藏到托盘。
+
+    手工命令不调用这里；只有 silent 类动作才会触发。任何失败都必须被吞掉：
+    客户端没装、启动失败或隐藏窗口失败都不应影响签到本身。
+    """
+    if client_launcher is None:
+        return
+    exe = None
+    try:
+        exe = find_workbuddy_runtime()
+    except AuthError:
+        pass
+    except Exception:
+        pass
+    try:
+        client_launcher.ensure_client_running("workbuddy", exe=exe)
+    except Exception:
+        pass
 
 
 def _run_auth_helper(exe, request):
@@ -1756,6 +1785,10 @@ def _run(action):
               "report": "未知命令：%s（可用：%s）" % (action, " / ".join(known))},
              action)
         return 2
+
+    # 计划任务运行前先确保桌面端在运行；手工调试命令保持原样，不启动客户端。
+    if action in ("silent", "silent-poll", "silent-growth"):
+        _ensure_client_running()
 
     auth_file, looked_in = find_auth_file()
     env_override = os.environ.get("WORKBUDDY_AUTH_FILE")

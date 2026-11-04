@@ -12,7 +12,7 @@
 - Qoder CN 通过路径加载 `qoder_signin.py`；只在其 `run_doctor()` 中增加脱敏账号摘要，它只读取 Qoder 桌面端登录态，不接触 WorkBuddy 凭据。
 - Trae 通过路径加载 `trae_signin.py`；后端移植自 TraeTools，只使用 Python 标准库，账号和签到历史独立存放。
 - 只调用脚本已经存在的命令入口，不新增接口。
-- WorkBuddy 界面只暴露非静默命令（`status` / `auto` / `growth` / `claim` / `all`）。`silent*` 系列只写日志文件、stdout 为空，对界面无意义，因此不出现。
+- WorkBuddy 操作栏只暴露三个动作（`status` / `claim` / `growth`）；`auto` / `all` 保留命令行能力，但不在栏里出现。`silent*` 系列只写日志文件、stdout 为空，对界面无意义，因此也不出现。
 - `doctor` 保留后端能力但不设独立按钮：启动时自动跑一次，用于填充「凭据格式」卡片和 WorkBuddy 账号卡片；账号卡片内提供「刷新账号」重新执行。
 - Qoder 的 `status` / `doctor` / `auto` 都在控制台内调用；`status` 与 `doctor` 是只读查询，`auto` 才真实领取。
 - Trae 的账号读取、签到历史与用量展示复用 `trae_signin.py`；`monitor()` 只读本地数据，`run_auto()` / `run_usage()` 才联网。
@@ -34,14 +34,14 @@
 
 左侧是固定侧边栏，顶部仍为全局顶栏：
 
-1. **侧边栏** —— 在「WorkBuddy」「Qoder CN」「Trae」三个监控页之间切换，记住上次选择（`localStorage` 的 `wbPage`）；三项各带连接状态圆点，左下角分别显示今日签到 / 领取结果：WorkBuddy 与 Trae 为「已签到 / 未签到」，Qoder 为「已领取 / 未领取」。圆点四态：绿「可用」（本机登录态可读）、黄「未登录」、灰空心「未安装」、红「异常」；「未安装」由后端探测本机桌面端（目录 / 启动器 / 卸载表 + 进程）判定，卸载后残留的凭据不会被画成绿点。Qoder 若显式配置了 `QODER_TOKEN`，没有桌面端也算可用。
+1. **侧边栏** —— 在「WorkBuddy」「Qoder CN」「Trae」三个监控页之间切换，记住上次选择（`localStorage` 的 `wbPage`）；每个模块名下方用同一行展示 16px 状态图形与该模块的最新重要事件（如「今天已签到，成功领取100积分！」「签到失败，查看日志原因。」「未安装」「未登录」「异常」），文字颜色与图形颜色一致。五种状态：绿圈对勾「签到成功」、灰圈横线「未登录」、灰空圈「未安装」、红圈叉号「签到失败」、蓝圈感叹号「异常」；未知状态或图形与文案不匹配时强制回退为蓝圈感叹号 +「异常！请查看日志！」。「未安装」由后端探测本机桌面端（目录 / 启动器 / 卸载表 + 进程）判定，卸载后残留的凭据不会被画成绿色。Qoder 若显式配置了 `QODER_TOKEN`，没有桌面端也算可用。
 2. 顶栏 —— 环境信息（Python 版本、平台、`signin.py` 定位结果）+ 主题切换
 
 WorkBuddy 页自上而下：
 
 1. 4 张指标卡 —— 今日积分 / 连签天数 / 总积分 / 凭据格式
-2. 操作按钮 —— 写操作带二次确认，主按钮 hover 加深而非变白
-3. 账号 —— 与 Trae / Qoder 共用的账号卡片网格；展示 WorkBuddy 本机账号的 UIN / UID 掩码、域名、状态、凭据格式和签到指标；卡片操作有「签到」（`claim` + `status`，二次确认）、「刷新」（`doctor` + `status`）和「查询签到」（仅 `status`）。WorkBuddy 账号来自本机客户端登录态，没有应用侧账号库，因此 Trae 的编辑 / 换设备 / 停用 / 删除不适用
+2. 操作按钮 —— 依次为「刷新监控」（只读）、「签到」和「成长中心」（真实写操作，二次确认）；签到完成后自动补一次只读 `status` 刷新指标与本月日历。主按钮 hover 加深而非变白
+3. 账号 —— 与 Trae / Qoder 共用的账号卡片网格；展示 WorkBuddy 本机账号的 UIN / UID 掩码、域名、状态、凭据格式和签到指标；标题栏提供「导入账号」（重新读取本机凭据，悬停提示「重新导入账号并刷新凭据」）与「刷新账号」，卡片操作有「签到」（`claim` + `status`，二次确认，今日已签到时变为「已签到」并禁用）、「刷新」（`doctor` + `status`）和「查询签到」（仅 `status`）。WorkBuddy 账号来自本机客户端登录态，没有应用侧账号库，因此 Trae 的编辑 / 换设备 / 停用 / 删除不适用
 4. 计划任务 —— 两个 Windows 计划任务的安装 / 启用 / 运行状态，以及安装、启停、立即运行、卸载操作
 5. 成长中心 —— 独立整行，上方是 Buddy 旅行 / 补登 / 连登兑换 / 抽奖 / Buddy 盲盒概览卡，下方是云端任务，按「未完成 / 已完成」分页签，带 `当前/目标` 进度；**始终完整展开，不设列表内滚动**（窗口放不下时整页滚动）
 6. 签到状态 + 当月日历 —— 同一行
@@ -51,16 +51,16 @@ Qoder CN 页自上而下：
 
 1. 4 张指标卡 —— 可领取 Credits / 本周期状态 / 登录态 / 计划任务
 2. 操作按钮 —— 「刷新监控」（只读）和「领取今日 Credits」（真实写操作，二次确认）
-3. 账号 —— 与 Trae / WorkBuddy 共用的账号卡片；展示 Qoder CN 头像、昵称、UID、掩码手机 / 邮箱、国内区域标记、令牌到期、设备与可领取 Credits；卡片操作有「签到」（`qoder_claim` → `auto`，二次确认）和「刷新」（`status` + `doctor`）。Qoder 凭据与设备标识来自本机 CN 客户端，没有应用侧账号库，因此编辑 / 换设备 / 停用 / 删除不适用
+3. 账号 —— 与 Trae / WorkBuddy 共用的账号卡片；展示 Qoder CN 头像、昵称、UID、掩码手机 / 邮箱、国内区域标记、令牌到期、设备与可领取 Credits；标题栏提供「导入账号」（重新读取本机凭据，悬停提示「重新导入账号并刷新凭据」）与「刷新账号」，卡片操作有「签到」（`qoder_claim` → `auto`，二次确认，本周期已领取后变为「已签到」并禁用）和「刷新」（`status` + `doctor`）。Qoder 凭据与设备标识来自本机 CN 客户端，没有应用侧账号库，因此编辑 / 换设备 / 停用 / 删除不适用
 4. 计划任务 —— `QoderDailyCredits` 的安装 / 启用 / 运行状态与操作，独立于 WorkBuddy 两个任务
 5. 活动与领取状态 + 登录态与设备 —— 同一行；左侧列出活动 key、Credits、领取状态和领取窗口，右侧显示账号目录、令牌来源 / 到期、设备标识与设备组件
 6. Qoder 日志 —— 读取 `qoder_signin.log` 末尾内容；手动领取结果也会补写进去
 
 Trae 页自上而下：
 
-1. 4 张指标卡 —— 今日获得 / 剩余积分 / 签到账号 / 计划任务
-2. 操作按钮 —— 「刷新监控」（只读）、「一键签到」（真实写操作，二次确认）、「导入本机登录态」「添加账号」「设置」
-3. 账号列表 —— 与 Qoder / WorkBuddy 共用同一套账号卡片；每个账号显示头像、备注、来源、**国内 / 国际区域徽标**、签到状态、剩余积分与掩码后的设备号；可单独签到、刷新、设为主号、编辑、换设备、启停、删除
+1. 4 张指标卡 —— 今日获得 / 剩余积分 / 签到账号 / 计划任务；剩余积分显示整数，悬停显示完整值
+2. 操作按钮 —— 「刷新监控」（只读）、「一键签到」（真实写操作，二次确认）、「设置」
+3. 账号列表 —— 与 Qoder / WorkBuddy 共用同一套账号卡片；标题栏提供「导入账号」「添加账号」「刷新状态」，其中导入账号悬停提示「重新导入账号并刷新凭据」；每个账号显示头像、备注、来源、**国内 / 国际区域徽标**、签到状态、剩余积分与掩码后的设备号；可单独签到、刷新、设为主号、编辑、换设备、启停、删除
 4. 计划任务 —— `TraeDailyCheckin` 的安装 / 启用 / 运行状态与操作，独立于 WorkBuddy 和 Qoder；直接放在账号卡片下方
 5. 签到状态 + 本月日历 —— 同一行，均以主号为准
 6. 用量统计 —— 选择 1 / 7 / 30 / 90 天，展示积分、Token、缓存命中、按模型汇总、逐会话明细与即将过期积分
@@ -94,7 +94,7 @@ Trae 页自上而下：
 3. 各区块按可见性懒加载：指标卡区块进入视口时自动执行 `status`，随后 `doctor`；成长中心区块进入视口时静默拉取成长中心；计划任务区块进入视口时才查询计划任务。`status` / `doctor` 与 `growth` 共用后端 `signin` 锁，因此成长中心会等签到查询跑完再发起
 4. `auto` / `growth` 执行完成后仍会自动重拉一次成长中心
 5. Qoder 数据在启动后由 `requestIdleCallback`（旧版 WebView2 兜底为定时器）异步预取，调用 `qoder_monitor()` 读取活动与登录态；切回页面时若缓存超过 1 分钟会静默补拉，点击「刷新监控」或领取完成后也会刷新
-6. Trae 数据同样在启动后异步预取，调用 `trae_monitor()` 读取本地账号、历史、用量与日志；只有「一键签到」「刷新状态」「同步用量」「导入本机登录态」才会进入后台任务
+6. Trae 数据同样在启动后异步预取，调用 `trae_monitor()` 读取本地账号、历史、用量与日志；只有「一键签到」「刷新状态」「同步用量」「导入账号」才会进入后台任务
 7. 停在 Qoder / Trae 页或窗口最小化 / 隐藏时跳过无意义的计划任务状态轮询；切回 WorkBuddy 页会重新判定未加载区块的可见性
 
 懒加载按数据源分区而不是一张卡一个请求：顶部四张卡共用同一次 `status` / `doctor` 查询，成长中心的概览卡与任务列表共用 `growth`，拆开只会增加往返和后端锁竞争。Qoder / Trae 的启动预取按页错开 1 秒，避免两个网络 / PowerShell 查询同时起跑。它只是把非首屏的查询推迟，并不会缩短 WebView2 的初始化时间；如果窗口高度足够、区块本来就在视口内，行为与启动即查询一致。
@@ -103,7 +103,7 @@ Trae 页自上而下：
 
 Qoder 的 `qoder_monitor()` 依次执行 `status`（查询活动）与 `doctor`（离线检查登录态），返回 `status` / `doctor` / 日志快照；手动领取由 `qoder_claim()` 启动后台线程，执行完成后通过 `qoder_log` 和 `qoder_done` 事件推送结果。两条链路都不读写 WorkBuddy 的缓存或锁。
 
-Trae 的 `trae_monitor()` 不联网：它读取 `accounts.json`、`checkin.db`、最近用量快照与日志，并返回 `accounts` / `active_id` / `settings` / `history` / `usage` / `clients` / `doctor` / `log`。签到、刷新、用量和导入由 `_start_trae()` 启动后台线程；忙碌时监控接口返回缓存并带 `busy: true`，结果通过 `trae_log` 和 `trae_done` 事件推送。账号公开数据只含 Token / Session 掩码，不返回原文。签到完成后会重新查询状态再写历史，避免把「接口返回成功」误当成实际到账。导入本机登录态时，后端用 Windows CNG 解密 `storage.json` 里的 `iCubeAuthInfo://icube.cloudide`（AES-128-CBC/PKCS#7，明文带 SHA-512 校验），再按 `account_uid` 合并多客户端结果，优先保留 `Trae CN` 的活动账号。
+Trae 的 `trae_monitor()` 不联网：它读取 `accounts.json`、`checkin.db`、最近用量快照与日志，并返回 `accounts` / `active_id` / `settings` / `history` / `usage` / `clients` / `doctor` / `log`。签到、刷新、用量和导入由 `_start_trae()` 启动后台线程；忙碌时监控接口返回缓存并带 `busy: true`，结果通过 `trae_log` 和 `trae_done` 事件推送。账号公开数据只含 Token / Session 掩码，不返回原文。签到完成后会重新查询状态再写历史，避免把「接口返回成功」误当成实际到账。导入账号时，后端用 Windows CNG 解密 `storage.json` 里的 `iCubeAuthInfo://icube.cloudide`（AES-128-CBC/PKCS#7，明文带 SHA-512 校验），再按 `account_uid` 合并多客户端结果，优先保留 `Trae CN` 的活动账号。
 
 成长中心走 `GET /v2/activity/growth/{tasks,buddy/travel/status,streak,heatmap,redeem/summary,lottery/chances,energy,buddy/quota}`，认证链路直接复用 `signin.py` 的 `find_auth_file` / `resolve_session` / `build_headers` / `get`，不另写一份 crypto。所有请求都是 GET；只有 `run('auto' / 'growth')` 会触发写操作。
 
@@ -155,6 +155,8 @@ Trae 同样使用独立的 `_TRAE_LOCK` 和 `_trae_busy` 状态。`trae_signin.p
 - 源码运行时：`pythonw.exe dashboard/webview/app.py --service silent`。`_service_runner()` 会优先找 `python.exe` 同目录的 `pythonw.exe`，避免弹出控制台。
 
 `--service` 分支不创建 WebView2，也不触发单实例锁；它直接调用 `Api._invoke()`，最终仍然走 `signin.py` 的 `_run()`。因此计划任务和手工执行使用同一套签到逻辑。
+
+计划任务开始前会检查对应桌面端是否在运行：未运行则按环境变量 / 注册表 / 常见安装目录定位可执行文件，以隐藏窗口方式启动并把顶层窗口隐藏到托盘；已在运行则跳过。手工操作（`auto` / `status` / `doctor` 等）不会触发拉起；客户端缺失或启动失败只跳过，不影响签到。设置 `AUTO_CLAIM_LAUNCH_CLIENT=0` 可关闭该行为。
 
 > 若「安装 / 修复」报 `0x80070005`（拒绝访问），用登录 WorkBuddy 的同一账号以管理员身份启动控制台后再安装。提权只用于注册任务，任务本身仍以普通权限运行。
 

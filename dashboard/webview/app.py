@@ -705,22 +705,24 @@ def _window_handle(window):
 # write=True 的会真实改动服务端状态（领积分、抽奖、消耗补登卡），
 # 前端对这类按钮强制二次确认。
 ACTIONS = {
-    "status":  dict(label="查签到状态", write=False, timeout=120,
-                    desc="只读查询，不改动任何状态"),
-    "auto":    dict(label="签到 + 成长中心", write=True, timeout=660,
-                    desc="先查签到状态，未签才领取今日积分，再跑完成长中心："
-                         "Buddy 旅行（到达收礼、空闲派发）、接任务与领任务奖、"
-                         "补登卡补当月断签、连登 7/14/28 天奖励兑换、开盲盒、能量开 Buddy"),
-    "growth":  dict(label="仅成长中心", write=True, timeout=660,
+    "status":  dict(label="刷新监控", write=False, timeout=120,
+                    desc="只读查询签到状态与本月记录，不改动任何状态"),
+    "claim":   dict(label="签到", write=True, timeout=120,
+                    desc="领取今日签到积分；接口幂等，已签时重复点击不会重复发积分；"
+                         "完成后自动补一次状态查询，刷新卡片与本月日历"),
+    "growth":  dict(label="成长中心", write=True, timeout=660,
                     desc="不碰签到接口，只跑成长中心：领旅行礼物与派 Buddy、"
                          "接任务并领任务奖、补登卡补当月断签（每轮最多 1 张）、"
                          "连登奖励兑换、开盲盒、能量开 Buddy"),
-    "claim":   dict(label="仅领取今日签到", write=True, timeout=120,
-                    desc="直接调领取接口拿今日积分，不查状态、不跑成长中心；"
-                         "接口幂等，已签时重复点击不会重复发积分"),
+    # auto / all 仍保留给命令行调用，但操作栏只放常用的三个动作。
+    "auto":    dict(label="签到 + 成长中心", write=True, timeout=660,
+                    desc="先查签到状态，未签才领取今日积分，再跑完成长中心："
+                         "Buddy 旅行（到达收礼、空闲派发）、接任务与领任务奖、"
+                         "补登卡补当月断签、连登 7/14/28 天奖励兑换、开盲盒、能量开 Buddy",
+                    hidden=True),
     "all":     dict(label="查询 + 领取", write=True, timeout=180,
                     desc="调试用：先查一次签到状态，再无条件调一次领取接口，"
-                         "两步的原始返回都打进日志"),
+                         "两步的原始返回都打进日志", hidden=True),
     # doctor 只保留后端能力，启动时自动跑一次填充「凭据格式」卡片，
     # 不在界面上暴露按钮——它对使用者没有可操作性。
     "doctor":  dict(label="离线体检", write=False, timeout=120,
@@ -1975,6 +1977,35 @@ class Api:
         except Exception as exc:
             _trace("回写失败记录失败: %r" % (exc,))
 
+    # ---------- 本机账号重新导入 ----------
+
+    def workbuddy_import(self):
+        """重新读取本机 WorkBuddy 登录态，供账号卡片「导入账号」使用。"""
+        if not os.path.isfile(SIGNIN):
+            return {"ok": False, "error": "未找到 signin.py"}
+        try:
+            with _SIGNIN_LOCK:
+                ok, report = _reimport_local("workbuddy")
+        except Exception as exc:
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+        _append_log("WorkBuddy 导入账号：%s" % report)
+        return {"ok": bool(ok), "report": report}
+
+    def qoder_import(self):
+        """重新读取本机 Qoder CN 登录态，供账号卡片「导入账号」使用。"""
+        if not os.path.isfile(QODER):
+            return {"ok": False, "error": "未找到 qoder_signin.py"}
+        try:
+            with _QODER_LOCK:
+                ok, report = _reimport_local("qoder")
+        except Exception as exc:
+            return {"ok": False,
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+        _append_qoder_log({"result": "OK" if ok else "ERROR", "report": report})
+        _append_log("Qoder 导入账号：%s" % report)
+        return {"ok": bool(ok), "report": report}
+
     # ---------- Qoder CN 监控 ----------
 
     @staticmethod
@@ -2225,7 +2256,7 @@ class Api:
     def _trae_worker(self, kind, account_id=None, days=None):
         event = {"kind": kind, "exit": 2, "payload": None}
         labels = {"checkin": "签到", "refresh": "刷新账号状态",
-                  "usage": "同步用量", "import": "导入本机登录态"}
+                  "usage": "同步用量", "import": "导入账号"}
         label = labels.get(kind, kind)
         try:
             self._push("trae_log", "[%s] 开始%s"

@@ -52,9 +52,10 @@ def pre_checks():
     r = run("语法检查", [PY, "-m", "py_compile",
                         os.path.join(HERE, "app.py"),
                         os.path.join(DASHBOARD, "win_guard.py"),
-                        os.path.join(REPO, "trae_signin.py")])
+                        os.path.join(REPO, "trae_signin.py"),
+                        os.path.join(REPO, "client_launcher.py")])
     if r != 0:
-        failed.append("app.py、win_guard.py 或 trae_signin.py 语法错误")
+        failed.append("app.py、win_guard.py、trae_signin.py 或 client_launcher.py 语法错误")
 
     js = os.path.join(HERE, "assets", "app.js")
     if run("JS 语法检查", ["node", "--check", js]) != 0:
@@ -120,6 +121,7 @@ def post_check():
     for name in ("win_theme.py", "win_title.py", "win_guard.py",
                  "win_service.py", "schedule_jitter.py", "win_icon.py"):
         paths.append((os.path.join(DASHBOARD, name), "dashboard/" + name))
+    paths.append((os.path.join(REPO, "client_launcher.py"), "client_launcher.py"))
     for path, label in paths:
         if os.path.isfile(path) and os.path.getmtime(path) > exe_mtime + 1:
             stale.append(label)

@@ -21,10 +21,8 @@
   --warn: #a87400;
   --err: #be2828;
 
-  /* 状态点专用色：--warn 是给文字用的深琥珀（保证小字号对比度），
-     直接拿来画小圆点在浅色背景上会发暗、像褐色。这里单独给一档
-     亮黄色，和侧边栏图例的「黄」严格对应。 */
-  --dot-warn: #ffc400;
+  /* 异常状态专用蓝：不跟随系统强调色，保证「蓝色感叹号」语义稳定。 */
+  --status-blue: #0078d4;
 
   --r-card: 10px;
   --r-btn: 8px;
@@ -48,7 +46,7 @@ html[data-theme="dark"] {
   --ok: #5cc47e;
   --warn: #d6a84a;
   --err: #d65c5c;
-  --dot-warn: #ffd75e;
+  --status-blue: #4cc2ff;
 
   --shadow: 0 1px 2px rgba(0, 0, 0, .4);
 }
@@ -237,7 +235,7 @@ body {
 }
 
 .sidebar {
-  flex: 0 0 176px;
+  flex: 0 0 196px;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -301,8 +299,9 @@ body {
 .side-text {
   display: flex;
   flex-direction: column;
-  gap: 1px;
+  gap: 2px;
   min-width: 0;
+  flex: 1 1 auto;
 }
 .side-text b {
   font-size: 12.5px;
@@ -311,43 +310,63 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.side-text small {
+
+/* 最新事件：16px 图形与文字同一行，文字换行时仍从同一列开始。 */
+.side-event {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+.side-event-text {
+  min-width: 0;
   font-size: 10.5px;
+  line-height: 1.35;
   color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
+/* 状态图形：五种正式状态共用 16px 圆圈（原 8px 指示器的 2 倍），
+   颜色和内部符号都由 SVG 绘制，避免不同字体下的 Unicode 差异。 */
 .side-dot {
-  width: 8px;
-  height: 8px;
+  width: 16px;
+  height: 16px;
   flex: 0 0 auto;
-  margin-left: auto;
-  border-radius: 50%;
-  background: var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  background: none;
+  border-radius: 0;
 }
-.side-dot.ok { background: var(--ok); }
-.side-dot.warn {
-  background: var(--dot-warn);
-  /* 亮黄在白色侧边栏上对比度低，内描一圈淡边让 8px 圆点仍有轮廓 */
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .12);
+.side-dot svg {
+  width: 100%;
+  height: 100%;
+  display: block;
 }
-.side-dot.err { background: var(--err); }
-.side-dot.busy { background: var(--dot-warn); animation: pulse 1.1s ease-in-out infinite; }
+.side-dot.ok { color: var(--ok); }
+.side-dot.warn { color: var(--text-dim); }
+.side-dot.err { color: var(--err); }
+.side-dot.off { color: var(--text-dim); }
+.side-dot.exception { color: var(--status-blue); }
+.side-dot.busy {
+  color: var(--text-dim);
+  animation: pulse 1.1s ease-in-out infinite;
+}
 
-/* 未安装：空心灰点。实心灰点和「未检测」分不开，而「未安装」必须一眼
-   区别于「连上了」——用内描边画出空心，浅色/深色主题都不会看错。 */
-.side-dot.off {
-  background: transparent;
-  box-shadow: inset 0 0 0 1.5px var(--text-dim);
-}
+.side-event-text.ok { color: var(--ok); }
+.side-event-text.warn { color: var(--text-dim); }
+.side-event-text.err { color: var(--err); }
+.side-event-text.off { color: var(--text-dim); }
+.side-event-text.exception { color: var(--status-blue); }
+.side-event-text.busy { color: var(--text-dim); }
 
-/* 侧边栏图例：两列排布，字号比正文再小一档 */
+/* 侧边栏图例：五种状态两列排布，图形与事件行保持同尺寸。 */
 .side-legend {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 3px 8px;
+  gap: 5px 8px;
   padding: 2px 9px 8px;
   font-size: 10px;
   color: var(--text-dim);
@@ -359,32 +378,11 @@ body {
   min-width: 0;
 }
 .side-legend .side-dot {
-  width: 7px;
-  height: 7px;
-  margin-left: 0;
+  width: 16px;
+  height: 16px;
 }
 
-.side-foot {
-  margin-top: auto;
-  padding: 10px 9px 2px;
-  border-top: 1px dashed var(--border);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.side-foot-label {
-  font-size: 10px;
-  color: var(--text-dim);
-  letter-spacing: .3px;
-}
-.side-foot-value {
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* ---------- 旧版左下角状态栏已由名称下方的最新事件取代 ---------- */
 
 .page[hidden] { display: none; }
 
@@ -1378,7 +1376,6 @@ main {
 /* ---------- Trae 多账号监控 ---------- */
 
 .side-badge.t { font-family: "Cascadia Mono", Consolas, monospace; }
-.side-foot + .side-foot { margin-top: 0; padding-top: 8px; }
 
 .pane-trae-accounts,
 .pane-qoder-account,

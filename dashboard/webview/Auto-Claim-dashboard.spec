@@ -48,6 +48,9 @@ hidden = [
     # 静态分析看不到它——必须显式声明，否则它内部的依赖
     # （plistlib / ntpath / winreg）一个都不会被打包。
     'signin',
+    # signin / qoder_signin / trae_signin 都会在 silent 模式下 import 它；
+    # 后两者按路径加载，静态分析看不到。
+    'client_launcher',
     'plistlib',
     'ntpath',
     'winreg',

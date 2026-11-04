@@ -23,6 +23,9 @@ Windows 上凭据由 DPAPI + AES-256-GCM 保护，macOS 上由钥匙串 + AES-12
   python qoder_signin.py auto --dry-run   # 只报告会领到什么
   python qoder_signin.py auto --once      # 不做网络重试
 
+计划任务的 silent 动作会在开始前检查 Qoder CN 是否在运行；未运行则以隐藏
+窗口方式拉起并隐藏到托盘。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可关闭。
+
 退出码：0 已领/今日已领/无活动；1 失败；2 没有登录态或参数错误。
 """
 
@@ -40,6 +43,11 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import client_launcher
+except Exception:  # 单独拷走 qoder_signin.py 时仍可运行
+    client_launcher = None
 
 VERSION = "1.0.0"
 
@@ -1116,11 +1124,25 @@ def run_status(api):
     return out, 0
 
 
+def _ensure_client_running():
+    """计划任务开始前尽量拉起 Qoder CN 并隐藏到托盘。"""
+    if client_launcher is None:
+        return
+    try:
+        client_launcher.ensure_client_running("qoder")
+    except Exception:
+        pass
+
+
 def run(action, dry_run=False, once=False, base_url=None):
     if action not in ("auto", "silent", "status", "doctor"):
         out = _result("ERROR", "未知命令：%s（可用：auto / silent / status / doctor）" % action)
         emit(out, action)
         return 2
+
+    # 只有计划任务使用的 silent 动作才自动拉起客户端；手工 auto 保持原样。
+    if action == "silent":
+        _ensure_client_running()
 
     if action == "doctor":
         out = run_doctor()

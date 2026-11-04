@@ -30,6 +30,9 @@ CLI:
   python trae_signin.py usage
   python trae_signin.py import-local
 
+计划任务的 silent 动作会在开始前检查 Trae CN 是否在运行；未运行则以隐藏
+窗口方式拉起并隐藏到托盘。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可关闭。
+
 退出码：0 成功/已签到；1 部分或全部失败；2 没有账号/登录态或参数错误。
 """
 
@@ -49,6 +52,11 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import client_launcher
+except Exception:  # 单独拷走 trae_signin.py 时仍可运行
+    client_launcher = None
 
 VERSION = "1.0.0"
 
@@ -2615,8 +2623,21 @@ def emit(out, action, quiet=False):
 
 # ---------------------------------------------------------------- CLI
 
+def _ensure_client_running():
+    """计划任务开始前尽量拉起 Trae CN 并隐藏到托盘。"""
+    if client_launcher is None:
+        return
+    try:
+        client_launcher.ensure_client_running("trae")
+    except Exception:
+        pass
+
+
 def run(action, account_id=None, days=None):
     action = (action or "auto").lower()
+    # 只有计划任务使用的 silent 动作才自动拉起客户端；手工 auto 保持原样。
+    if action == "silent":
+        _ensure_client_running()
     if action == "doctor":
         payload = doctor_payload()
     elif action == "status":

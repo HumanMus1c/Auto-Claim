@@ -92,52 +92,48 @@
 </header>
 
 <div class="shell">
-  <!-- 侧边栏：在 WorkBuddy 与 Qoder CN 两个监控页之间切换 -->
+  <!-- 侧边栏：在 WorkBuddy、Qoder CN 与 Trae 三个监控页之间切换。
+       名称下方展示该模块的最新事件，事件文字和左侧图形同心对齐。 -->
   <aside class="sidebar" aria-label="监控页面切换">
-    <div class="side-title" title="绿点 可用 · 黄点 未登录 · 灰空心 未安装 · 红点 异常">监控</div>
+    <div class="side-title"
+         title="绿圈对勾 签到成功 · 灰圈横线 未登录 · 灰空心圈 未安装 · 红圈叉号 签到失败 · 蓝圈感叹号 异常">监控</div>
     <button class="side-tab active" type="button" data-page="workbuddy">
       <span class="side-badge">W</span>
       <span class="side-text">
         <b>WorkBuddy</b>
-        <small>签到 · 成长中心</small>
+        <span class="side-event">
+          <span class="side-dot busy" id="wbDot" data-state="busy"></span>
+          <small class="side-event-text busy" id="wbSideHint">正在检测…</small>
+        </span>
       </span>
-      <span class="side-dot" id="wbDot"></span>
     </button>
     <button class="side-tab" type="button" data-page="qoder" id="sideQoder">
       <span class="side-badge q">Q</span>
       <span class="side-text">
         <b>Qoder CN</b>
-        <small>每日 100 Credits</small>
+        <span class="side-event">
+          <span class="side-dot busy" id="qoderDot" data-state="busy"></span>
+          <small class="side-event-text busy" id="qoderSideHint">正在检测…</small>
+        </span>
       </span>
-      <span class="side-dot" id="qoderDot"></span>
     </button>
     <button class="side-tab" type="button" data-page="trae" id="sideTrae">
       <span class="side-badge t">T</span>
       <span class="side-text">
         <b>Trae</b>
-        <small>多账号签到 · 用量</small>
+        <span class="side-event">
+          <span class="side-dot busy" id="traeDot" data-state="busy"></span>
+          <small class="side-event-text busy" id="traeSideHint">正在检测…</small>
+        </span>
       </span>
-      <span class="side-dot" id="traeDot"></span>
     </button>
-    <!-- 状态点图例：7px 的小圆点不解释就只能靠猜，尤其「未安装」和
-         「未登录」在浅色背景上很容易被看成绿色。 -->
-    <div class="side-legend" aria-label="状态点图例">
-      <span><i class="side-dot ok"></i>可用</span>
-      <span><i class="side-dot warn"></i>未登录</span>
-      <span><i class="side-dot off"></i>未安装</span>
-      <span><i class="side-dot err"></i>异常</span>
-    </div>
-    <div class="side-foot">
-      <span class="side-foot-label">WorkBuddy 状态</span>
-      <span class="side-foot-value" id="wbSideHint">未检测</span>
-    </div>
-    <div class="side-foot">
-      <span class="side-foot-label">Qoder 状态</span>
-      <span class="side-foot-value" id="qoderSideHint">未检测</span>
-    </div>
-    <div class="side-foot">
-      <span class="side-foot-label">Trae 状态</span>
-      <span class="side-foot-value" id="traeSideHint">未检测</span>
+    <!-- 图例：五种状态共用 16px 圆圈，只靠内部符号和颜色区分。 -->
+    <div class="side-legend" aria-label="状态图例">
+      <span><i class="side-dot ok" data-state="ok"></i>签到成功</span>
+      <span><i class="side-dot warn" data-state="warn"></i>未登录</span>
+      <span><i class="side-dot off" data-state="off"></i>未安装</span>
+      <span><i class="side-dot err" data-state="err"></i>签到失败</span>
+      <span><i class="side-dot exception" data-state="exception"></i>异常</span>
     </div>
   </aside>
 
@@ -170,10 +166,8 @@
   <section class="actions">
     <div class="act-group" id="actGroup"></div>
     <div class="spacer"></div>
-    <button class="btn ghost" id="btnGrowth">刷新成长中心</button>
-    <button class="btn ghost" id="btnClear">清空日志</button>
   </section>
-  <p class="hint" id="actionHint">只读查询不会改动服务端状态；带「写操作」标记的会真实领取。悬停按钮可查看完整说明。</p>
+  <p class="hint" id="actionHint">刷新监控只读；签到与成长中心会真实改动服务端状态。悬停按钮可查看完整说明。</p>
 
   <!-- ③ 账号管理 -->
   <section class="pane account-pane pane-workbuddy-account">
@@ -181,6 +175,7 @@
       <h2>账号</h2>
       <div class="pane-tools">
         <span class="growth-updated" id="wbAccountAt">尚未刷新</span>
+        <button class="mini-btn" id="btnWbImport" title="重新导入账号并刷新凭据">导入账号</button>
         <button class="mini-btn" id="btnWbAccountRefresh" title="重新读取 WorkBuddy 本机登录态与账号摘要">刷新账号</button>
       </div>
     </div>
@@ -225,7 +220,7 @@
       </div>
     </div>
     <div class="growth-overview" id="growthOverview">
-      <p class="empty">点击「刷新成长中心」加载 Buddy 旅行、补登、连登兑换、抽奖与 Buddy 盲盒数据</p>
+      <p class="empty">点击「刷新」加载 Buddy 旅行、补登、连登兑换、抽奖与 Buddy 盲盒数据</p>
     </div>
     <div class="growth-subhead">
       <h3>任务</h3>
@@ -235,7 +230,7 @@
       </div>
     </div>
     <div class="tasklist" id="tasklist">
-      <p class="empty">点击「刷新成长中心」拉取</p>
+      <p class="empty">点击「刷新」拉取</p>
     </div>
   </section>
 
@@ -320,6 +315,7 @@
         <h2>账号</h2>
         <div class="pane-tools">
           <span class="growth-updated" id="qoderAccountAt">尚未刷新</span>
+          <button class="mini-btn" id="btnQoderImport" title="重新导入账号并刷新凭据">导入账号</button>
           <button class="mini-btn" id="btnQoderAccountRefresh" title="重新读取 Qoder CN 本机登录态与账号摘要">刷新账号</button>
         </div>
       </div>
@@ -420,8 +416,6 @@
       <button class="btn primary" id="btnTraeRefresh" title="重新读取账号、签到历史、用量与日志（不联网）">刷新监控</button>
       <button class="btn act" id="btnTraeCheckin" title="真实调用 Trae 签到接口；已签到账号会自动跳过">一键签到</button>
       <div class="spacer"></div>
-      <button class="btn ghost" id="btnTraeImport" title="只读扫描本机 Trae 客户端登录态并导入">导入本机登录态</button>
-      <button class="btn ghost" id="btnTraeAdd" title="粘贴 Cloud-IDE-JWT Token 或 X-Cloudide-Session 会话 Cookie">添加账号</button>
       <button class="btn ghost" id="btnTraeSettings" title="自动签到时间、签到间隔、用量天数与飞书推送">设置</button>
     </section>
     <p class="hint" id="traeHint">刷新监控只读；一键签到与账号操作会真实改动本地账号或服务端签到状态。</p>
@@ -431,6 +425,8 @@
         <h2>账号</h2>
         <div class="pane-tools">
           <span class="growth-updated" id="traeAccountsAt">尚未刷新</span>
+          <button class="mini-btn" id="btnTraeImport" title="重新导入账号并刷新凭据">导入账号</button>
+          <button class="mini-btn" id="btnTraeAdd" title="粘贴 Cloud-IDE-JWT Token 或 X-Cloudide-Session 会话 Cookie">添加账号</button>
           <button class="mini-btn" id="btnTraeAccountsRefresh" title="刷新所有启用账号的状态与剩余积分">刷新状态</button>
         </div>
       </div>

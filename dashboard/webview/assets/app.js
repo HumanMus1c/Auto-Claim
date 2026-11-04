@@ -55,6 +55,7 @@ let PAGE_PREFETCH_STARTED = false;
 let WB_STATUS = null;
 let WB_DOCTOR = null;
 let WB_ACCOUNT_PENDING = null;
+let WB_LAST_EVENT = null;
 
 /* 本机桌面端安装 / 运行状态，由后端 bootstrap / monitor 一起下发。
  * 形状：{installed: true|false|null, running: true|false|null, path, source}。
@@ -76,19 +77,13 @@ function applyDesktopInfo(map) {
  * 而对压根没装的模块来说，这一两秒的等待毫无意义。 */
 function paintDesktopAbsent() {
   if (desktopMissing('workbuddy') && !WB_DOCTOR && !WB_STATUS) {
-    const hint = $('wbSideHint');
-    if (hint) hint.textContent = '未安装';
-    wbSetDot('off', '本机未检测到 WorkBuddy 桌面端');
+    wbSetDot('off', '本机未检测到 WorkBuddy 桌面端', '未安装');
   }
   if (desktopMissing('qoder') && !QODER_DATA) {
-    const hint = $('qoderSideHint');
-    if (hint) hint.textContent = '未安装';
-    qoderSetDot('off', '本机未检测到 Qoder CN 桌面端（安装并登录后才会连接）');
+    qoderSetDot('off', '本机未检测到 Qoder CN 桌面端（安装并登录后才会连接）', '未安装');
   }
   if (desktopMissing('trae') && !TRAE_DATA) {
-    const hint = $('traeSideHint');
-    if (hint) hint.textContent = '未安装';
-    traeSetDot('off', '本机未检测到 Trae 桌面端');
+    traeSetDot('off', '本机未检测到 Trae 桌面端', '未安装');
   }
 }
 
@@ -109,32 +104,141 @@ function desktopPath(kind) {
   return raw.replace(/[\\/][^\\/]+$/, '');
 }
 
-/* 状态点统一语义（侧边栏「监控」下方有图例）：
- *   ok   绿   可用：本机登录态可读（不要求桌面端正在运行）
- *   warn 黄   未登录：已安装，但没登录 / 没配置账号
- *   err  红   异常：登录态失效或读取失败
- *   off  灰   未安装：本机没有这个桌面端（空心）
- *   busy 黄闪 正在检测
- * 颜色只在鼠标悬停时给出 title 是不够的，所以每个点都带 aria-label，
- * 图例也放在侧边栏里，避免 7px 的小圆点被当成「连上了」。 */
-const DOT_HINT = {
-  ok: '可用：本机登录态可读',
-  warn: '未登录：需要在该应用里登录一次',
-  err: '异常：登录态失效或读取失败',
-  off: '未安装：本机未检测到该桌面端',
+/* 侧边栏状态图形统一语义（名称下方展示同一状态的最新事件）：
+ *   ok        绿圈 + 对勾    签到成功
+ *   warn      灰圈 + 横线    未登录 / 尚未签到
+ *   err       红圈 + 叉号    签到失败
+ *   off       灰空圈         未安装
+ *   exception 蓝圈 + 感叹号  异常；未知状态或图文不一致时强制回退到这里
+ *   busy      灰圈闪动       正在检测 / 正在领取
+ * 五种正式状态共用 16px 圆圈，内部符号同色，避免只靠颜色区分。 */
+const STATUS_DEFAULT_TEXT = {
+  ok: '今天已签到，成功领取积分！',
+  warn: '未登录',
+  err: '签到失败，查看日志原因。',
+  off: '未安装',
+  exception: '异常！请查看日志！',
   busy: '正在检测…',
-  '': '尚未检测',
 };
 
-function paintDot(id, kind, detail) {
-  const dot = $(id);
+const STATUS_ALIAS = {
+  success: 'ok', ok: 'ok',
+  login: 'warn', warn: 'warn',
+  fail: 'err', error: 'err', err: 'err',
+  absent: 'off', missing: 'off', off: 'off',
+  abnormal: 'exception', unknown: 'exception', exception: 'exception',
+  busy: 'busy', '': 'busy',
+};
+
+/* 这些文案与图形是一一绑定的。若调用方把「未安装」配成绿圈，或把
+ * 「今天已签到」配成红叉，说明状态已经自相矛盾，按需求统一回退成
+ * 蓝色异常 +「异常！请查看日志！」。 */
+const STATUS_TEXT_OWNER = {
+  '未登录': 'warn',
+  '未安装': 'off',
+  '签到失败，查看日志原因。': 'err',
+  '异常！请查看日志！': 'exception',
+  '正在检测…': 'busy',
+};
+
+const STATUS_SVG = {
+  ok: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M4.8 8.2l2.1 2.1 4.3-4.4"/></svg>',
+  warn: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M4.8 8h6.4"/></svg>',
+  err: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M5.5 5.5l5 5M10.5 5.5l-5 5"/></svg>',
+  exception: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/><path d="M8 4.4v4.3"/><circle cx="8" cy="11.15" r=".85" fill="currentColor" stroke="none"/></svg>',
+  off: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25"/></svg>',
+  busy: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6.25" stroke-dasharray="2.4 2.2"/></svg>',
+};
+
+function normalizedStatusKind(kind) {
+  const key = String(kind == null ? '' : kind).toLowerCase();
+  return STATUS_ALIAS[key] || 'exception';
+}
+
+function renderStatusGlyph(dot, kind) {
   if (!dot) return;
-  dot.className = 'side-dot' + (kind ? ' ' + kind : '');
-  dot.title = detail || DOT_HINT[kind] || DOT_HINT[''];
-  if (typeof dot.setAttribute === 'function') {
-    dot.setAttribute('aria-label', dot.title);
-    dot.setAttribute('data-state', kind || 'unknown');
+  const safeKind = normalizedStatusKind(kind);
+  dot.innerHTML = STATUS_SVG[safeKind] || STATUS_SVG.exception;
+}
+
+function statusFallback(title) {
+  return {
+    kind: 'exception',
+    text: STATUS_DEFAULT_TEXT.exception,
+    title: title || STATUS_DEFAULT_TEXT.exception,
+  };
+}
+
+/** 校验图形与文案是否属于同一状态；不一致时统一回退到蓝色异常。 */
+function normalizeSideEvent(event) {
+  const raw = event || {};
+  const kind = normalizedStatusKind(raw.kind);
+  let text = String(raw.text == null ? '' : raw.text).trim();
+  if (kind === 'exception') {
+    return statusFallback(raw.title || text || STATUS_DEFAULT_TEXT.exception);
   }
+  const owner = STATUS_TEXT_OWNER[text];
+  const successMismatch = /^今天已签到/.test(text) && kind !== 'ok';
+  if ((owner && owner !== kind) || successMismatch) {
+    return statusFallback(raw.title || ('状态不一致：' + (text || kind)));
+  }
+  if (!text) text = STATUS_DEFAULT_TEXT[kind] || STATUS_DEFAULT_TEXT.exception;
+  return { kind, text, title: raw.title || text };
+}
+
+/** 同时落图形、颜色、事件文案，避免任何一处单独更新后与其它位置不一致。 */
+function paintSideEvent(dotId, hintId, event) {
+  const safe = normalizeSideEvent(event);
+  const dot = $(dotId);
+  if (dot) {
+    dot.className = 'side-dot ' + safe.kind;
+    renderStatusGlyph(dot, safe.kind);
+    dot.title = safe.title;
+    if (typeof dot.setAttribute === 'function') {
+      dot.setAttribute('aria-label', safe.text + ' · ' + safe.title);
+      dot.setAttribute('data-state', safe.kind);
+    }
+  }
+  const hint = $(hintId);
+  if (hint) {
+    hint.textContent = safe.text;
+    hint.title = safe.title;
+    hint.className = 'side-event-text ' + safe.kind;
+    if (typeof hint.setAttribute === 'function') {
+      hint.setAttribute('data-state', safe.kind);
+    }
+  }
+  return safe;
+}
+
+/* 静态圆点（图例和首屏占位）不经过 paintSideEvent，启动时补一次内部 SVG。 */
+function paintStaticDots() {
+  document.querySelectorAll('.side-dot[data-state]').forEach((dot) => {
+    const kind = normalizedStatusKind(
+      (dot.dataset && dot.dataset.state) || 'off');
+    dot.className = 'side-dot ' + kind;
+    renderStatusGlyph(dot, kind);
+    if (typeof dot.setAttribute === 'function'
+        && dot.closest && dot.closest('.side-legend')) {
+      dot.setAttribute('aria-hidden', 'true');
+    }
+  });
+}
+
+function isToday(timestamp) {
+  if (!timestamp) return false;
+  const then = new Date(timestamp);
+  const now = new Date();
+  return then.getFullYear() === now.getFullYear()
+    && then.getMonth() === now.getMonth()
+    && then.getDate() === now.getDate();
+}
+
+function statusSuccessText(credit) {
+  const amount = firstNum(credit);
+  return amount != null && amount > 0
+    ? '今天已签到，成功领取' + amount + '积分！'
+    : STATUS_DEFAULT_TEXT.ok;
 }
 
 function savedPage() {
@@ -380,10 +484,6 @@ function appendLog(text, kind) {
   if ($('autoScroll').checked) box.scrollTop = box.scrollHeight;
 }
 
-function clearLog() {
-  $('log').innerHTML = '';
-}
-
 function logText() {
   return Array.from($('log').children)
     .map((row) => {
@@ -430,8 +530,10 @@ function fallback(text, done, fail) {
 
 /* ---------- 指标卡 ---------- */
 
-function setCard(valueId, hintId, value, hint) {
-  $(valueId).textContent = value == null || value === '' ? '—' : String(value);
+function setCard(valueId, hintId, value, hint, title) {
+  const valueEl = $(valueId);
+  valueEl.textContent = value == null || value === '' ? '—' : String(value);
+  valueEl.title = title || '';
   $(hintId).textContent = hint || '';
 }
 
@@ -539,11 +641,12 @@ function wbCredentialLabel(fmt) {
     : (fmt || '—');
 }
 
-function wbSetDot(kind, detail) {
-  paintDot('wbDot', kind, detail);
+function wbSetDot(kind, detail, text) {
+  return paintSideEvent('wbDot', 'wbSideHint',
+    { kind, title: detail, text });
 }
 
-/** 侧边栏 WorkBuddy 状态点：绿=登录态可读，灰=本机没装，黄=未登录，红=异常。 */
+/** 侧边栏 WorkBuddy 登录态点：保留给状态点回归测试与其它模块判断。 */
 function wbDotState(doctor, status, desktop) {
   if (desktop && desktop.installed === false) {
     return { kind: 'off', title: '本机未检测到 WorkBuddy 桌面端' };
@@ -573,29 +676,131 @@ function wbDotState(doctor, status, desktop) {
   return { kind: '', title: '尚未检测 WorkBuddy 登录态' };
 }
 
-/** 侧边栏 WorkBuddy 状态：状态点表示登录态，文字只表示今日签到结果。 */
-function wbSideState() {
-  const hint = $('wbSideHint');
-  if (!hint) return;
+function wbStatusChecked(status) {
+  return !!(status && (status.today_checked_in === true
+    || status.result === 'ALREADY' || status.result === 'CLAIMED'));
+}
 
+/** 账号卡片用：当天成功领取过就保持「已签到」，不依赖后续 status 是否回显。 */
+function wbClaimedToday() {
+  return wbStatusChecked(WB_STATUS)
+    || !!(WB_LAST_EVENT && WB_LAST_EVENT.kind === 'ok'
+          && isToday(WB_LAST_EVENT.at));
+}
+
+const WB_FAIL_RESULTS = ['AUTH_REJECTED', 'NO_SESSION', 'FORBIDDEN',
+  'ERROR', 'NETWORK', 'TIMEOUT', 'UNKNOWN', 'AUTH_ERROR'];
+
+/** 侧边栏 WorkBuddy 最新事件：同一份数据同时决定图形和文字。 */
+function wbSideEvent() {
   const doctor = WB_DOCTOR;
   const status = WB_STATUS;
-  const dot = wbDotState(doctor, status, desktopInfo('workbuddy'));
-  let text = '未检测';
+
+  if (desktopMissing('workbuddy')) {
+    return { kind: 'off', text: '未安装',
+             title: '本机未检测到 WorkBuddy 桌面端' };
+  }
+
+  const result = String((status && status.result) || '').toUpperCase();
+  if (wbStatusChecked(status)) {
+    return {
+      kind: 'ok',
+      text: statusSuccessText(status && firstNum(
+        status.credit, status.today_credit, status.daily_credit)),
+      title: (status && status.report) || 'WorkBuddy 今日已签到',
+    };
+  }
+  if (result === 'NO_AUTH') {
+    return { kind: 'warn', text: '未登录',
+             title: (status && status.report) || '未找到 WorkBuddy 登录态' };
+  }
+  if (WB_FAIL_RESULTS.indexOf(result) >= 0) {
+    return { kind: 'err', text: '签到失败，查看日志原因。',
+             title: (status && status.report) || result };
+  }
+
+  // 查询成功只代表「现在还没签」，不能覆盖今天刚发生的领取结论。
+  if (WB_LAST_EVENT && isToday(WB_LAST_EVENT.at)) {
+    if (WB_LAST_EVENT.kind === 'err' || WB_LAST_EVENT.kind === 'exception'
+        || WB_LAST_EVENT.kind === 'ok') {
+      return WB_LAST_EVENT;
+    }
+  }
 
   if (status) {
-    const checked = status.today_checked_in === true
-      || status.result === 'ALREADY' || status.result === 'CLAIMED';
-    text = checked ? '已签到' : '未签到';
-  } else if (doctor) {
-    // 登录态已读出但还没查询签到：先按未签到展示，查询完成后自动更正。
-    text = '未签到';
+    if (result === 'INACTIVE') {
+      return { kind: 'warn', text: '签到活动未开启。',
+               title: status.report || result };
+    }
+    if (!result || result === 'OK' || result === 'ALREADY'
+        || result === 'CLAIMED') {
+      return { kind: 'warn', text: '尚未签到，点击签到领取积分。',
+               title: status.report || '今日尚未签到' };
+    }
+    return { kind: 'exception',
+             title: status.report || ('未识别的签到状态：' + result) };
   }
-  if (dot.kind === 'off') text = '未安装';
 
-  hint.textContent = text;
-  hint.title = dot.title;
-  wbSetDot(dot.kind, dot.title);
+  if (doctor) {
+    const dr = String(doctor.result || '').toUpperCase();
+    if (dr === 'NO_AUTH') {
+      return { kind: 'warn', text: '未登录',
+               title: doctor.report || '未找到 WorkBuddy 登录态' };
+    }
+    if (dr === 'AUTH_REJECTED') {
+      return { kind: 'err', text: '签到失败，查看日志原因。',
+               title: doctor.report || 'WorkBuddy 登录态已失效' };
+    }
+    if (dr === 'AUTH_READY') {
+      return { kind: 'warn', text: '尚未签到，点击签到领取积分。',
+               title: doctor.report || 'WorkBuddy 登录态已就绪' };
+    }
+    if (dr === 'AUTH_ERROR' || dr === 'ERROR') {
+      return { kind: 'exception', title: doctor.report || dr };
+    }
+    return { kind: 'exception',
+             title: doctor.report || ('未识别的登录状态：' + dr) };
+  }
+
+  return { kind: 'busy', text: '正在检测…',
+           title: '尚未检测 WorkBuddy 登录态' };
+}
+
+/** 侧边栏 WorkBuddy 最新事件：图形、颜色、文案一起刷新。 */
+function wbSideState() {
+  const event = wbSideEvent();
+  wbSetDot(event.kind, event.title, event.text);
+}
+
+/** 记录 WorkBuddy 本轮领取结果；当天有效，跨天自动失效。 */
+function recordWbOutcome(payload, exit) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const result = String(p.result || '').toUpperCase();
+  const report = p.report || p.error || result;
+  const at = Date.now();
+
+  if (result === 'NO_AUTH') {
+    WB_LAST_EVENT = { kind: 'warn', text: '未登录', title: report, at };
+  } else if (result === 'INACTIVE') {
+    WB_LAST_EVENT = { kind: 'warn', text: '签到活动未开启。', title: report, at };
+  } else if (result === 'CLAIMED' || result === 'ALREADY'
+             || wbStatusChecked(p)) {
+    WB_LAST_EVENT = {
+      kind: 'ok',
+      text: statusSuccessText(firstNum(
+        p.credit, p.today_credit, p.daily_credit)),
+      title: report,
+      at,
+    };
+  } else if (WB_FAIL_RESULTS.indexOf(result) >= 0 || exit !== 0) {
+    WB_LAST_EVENT = {
+      kind: 'err', text: '签到失败，查看日志原因。', title: report, at,
+    };
+  } else if (result) {
+    WB_LAST_EVENT = { kind: 'exception', title: report || result, at };
+  } else {
+    WB_LAST_EVENT = null;
+  }
 }
 
 function renderWorkbuddyAccount() {
@@ -667,8 +872,7 @@ function renderWorkbuddyAccount() {
   const credit = status ? firstNum(status.credit, status.today_credit,
     status.daily_credit) : null;
   const streak = status ? firstNum(status.streak_days) : null;
-  const checked = !!(status && (status.today_checked_in === true
-    || status.result === 'ALREADY' || status.result === 'CLAIMED'));
+  const checked = wbClaimedToday();
 
   const badges = document.createElement('div');
   badges.className = 'ta-badges';
@@ -697,8 +901,11 @@ function renderWorkbuddyAccount() {
 
   const actions = document.createElement('div');
   actions.className = 'ta-actions';
-  actions.appendChild(accountActionButton('签到', '领取今日 WorkBuddy 签到积分（真实写操作，需二次确认）',
-    (e) => wbAccountClaim(e.currentTarget)));
+  const claimLabel = checked ? '已签到' : '签到';
+  actions.appendChild(accountActionButton(claimLabel,
+    checked ? '今日已签到，无需重复领取'
+      : '领取今日 WorkBuddy 签到积分（真实写操作，需二次确认）',
+    (e) => wbAccountClaim(e.currentTarget), '', checked));
   actions.appendChild(accountActionButton('刷新', '重新读取 WorkBuddy 本机登录态与签到状态',
     refreshWorkbuddyAccount));
   actions.appendChild(accountActionButton('查询签到', '只重新查询 WorkBuddy 签到状态',
@@ -743,7 +950,7 @@ function renderTasks() {
 
   box.innerHTML = '';
   if (!TASKS.length) {
-    box.innerHTML = '<p class="empty">点击「刷新成长中心」拉取</p>';
+    box.innerHTML = '<p class="empty">点击「刷新」拉取</p>';
     return;
   }
   if (!list.length) {
@@ -1083,12 +1290,7 @@ function maybeLoadGrowth() {
 function loadGrowth(silent) {
   if (GROWTH_LOADING) return;
   GROWTH_LOADING = true;
-  const btn = $('btnGrowth');
   const paneBtn = $('btnGrowthRefresh');
-  if (btn) {
-    btn.disabled = true;
-    btn.textContent = '刷新中…';
-  }
   if (paneBtn) paneBtn.disabled = true;
   call('growth')
     .then((r) => {
@@ -1111,10 +1313,6 @@ function loadGrowth(silent) {
     .catch((e) => appendLog('刷新成长中心异常：' + e, 'err'))
     .finally(() => {
       GROWTH_LOADING = false;
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = '刷新成长中心';
-      }
       if (paneBtn) paneBtn.disabled = BUSY;
     });
 }
@@ -1124,26 +1322,33 @@ function loadGrowth(silent) {
 /* ---------- 本月签到日历 ---------- */
 
 /**
- * 用 checkin_dates 画当月日历。
+ * 用 checkin_dates 画本月日历。
  * 之前这里放的是"近 14 次查询"的柱状图，但每天的 daily_credit 是固定的，
  * 画出来就是 14 根一模一样的柱子，没有任何信息量——换成日历才说得通：
  * 哪天签了、哪天断了，一眼可见。
+ *
+ * checkin_dates 可能包含跨月历史，必须按完整 YYYY-MM 过滤；只比较「日」
+ * 会让往月的 1 号把本月 1 号点亮，整月看起来都签过。
  */
 function renderCalendar(d) {
   const box = $('cal');
-  const dates = Array.isArray(d.checkin_dates) ? d.checkin_dates : [];
-  if (!dates.length) return;
+  const dates = Array.isArray(d.checkin_dates)
+    ? d.checkin_dates.map((s) => String(s).slice(0, 10))
+    : [];
 
-  // 以服务端返回的活动区间为准，避免本机时区把月初算错
-  const sample = dates[0];                       // 形如 2026-10-19
-  const [y, m] = sample.split('-').map(Number);
-  const first = new Date(y, m - 1, 1);
-  const days = new Date(y, m, 0).getDate();
+  // 固定以本机今天所在月份为准（服务端返回的也是本地日历日）。
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth() + 1;
+  const monthKey = year + '-' + String(month).padStart(2, '0');
+  const monthDates = dates.filter((s) => s.slice(0, 7) === monthKey);
+  const daySet = new Set(monthDates.map((s) => Number(s.slice(8, 10))));
+
+  const first = new Date(year, month - 1, 1);
+  const days = new Date(year, month, 0).getDate();
   const lead = first.getDay();                  // 周日为 0
   const rows = Math.ceil((lead + days) / 7);    // 当月实际占用的周数
-  const todayStr = null;                        // 稍后用今天（服务端无该字段）
-
-  const set = new Set(dates.map((s) => String(s).slice(8, 10)));
+  const today = now.getDate();
 
   box.innerHTML = '';
 
@@ -1167,7 +1372,8 @@ function renderCalendar(d) {
     const cell = document.createElement('div');
     cell.className = 'cal-day';
     cell.textContent = dnum;
-    if (set.has(String(dnum).padStart(2, '0'))) cell.classList.add('on');
+    if (daySet.has(dnum)) cell.classList.add('on');
+    if (dnum === today) cell.classList.add('today');
     grid.appendChild(cell);
   }
   box.appendChild(grid);
@@ -1181,7 +1387,7 @@ function renderCalendar(d) {
   lg.innerHTML = '<b class="on"></b>已签到';
   foot.appendChild(lg);
 
-  const monthCount = dates.filter((s) => String(s).startsWith(sample.slice(0, 7))).length;
+  const monthCount = new Set(monthDates).size;
   const cnt = document.createElement('span');
   cnt.textContent = '本月 ' + monthCount + ' 天';
   foot.appendChild(cnt);
@@ -1240,6 +1446,13 @@ window.__onBackend = function (kind, data) {
     if (data.action === 'doctor') {
       renderFromDoctor(p);
     } else if (p && STATUS_ACTIONS.indexOf(data.action) >= 0) {
+      // 领取 / 自动签到先记下本轮结论，再渲染状态：后续 status 查询若只
+      // 返回「今天还没签」，也不会把刚发生的失败或成功悄悄覆盖掉。
+      if (data.action === 'claim' || data.action === 'auto'
+          || data.action === 'all') {
+        recordWbOutcome(p, data.exit);
+        wbSideState();
+      }
       // status / auto / claim / all 的签到字段结构一致，统一走同一个渲染。
       // 成长中心的细项由 loadGrowth() 单独渲染。
       renderFromStatus(p);
@@ -1266,7 +1479,7 @@ let BUSY = false;
 let PENDING = null;      // 等待二次确认的动作 {key, btn}
 
 // 各面板标题栏上的刷新按钮；命令执行期间统一禁用，避免重复触发。
-const PANE_REFRESH_BUTTONS = ['btnGrowthRefresh', 'btnStatusRefresh', 'btnCalRefresh', 'btnWbAccountRefresh'];
+const PANE_REFRESH_BUTTONS = ['btnGrowthRefresh', 'btnStatusRefresh', 'btnCalRefresh', 'btnWbAccountRefresh', 'btnWbImport'];
 
 function setPaneRefreshDisabled(on) {
   PANE_REFRESH_BUTTONS.forEach((id) => {
@@ -1281,7 +1494,7 @@ function setBusy(on) {
     if (!b.classList.contains('confirm')) b.disabled = on;
   });
   setPaneRefreshDisabled(on);
-  if (on) wbSetDot('busy');
+  if (on) wbSetDot('busy', '', '正在执行…');
   else wbSideState();
   setBadge(on ? '执行中…' : '就绪', on ? 'busy' : 'ok');
 }
@@ -1298,17 +1511,47 @@ function refreshWorkbuddyAccount() {
   runSeries(['doctor', 'status']);
 }
 
+/** 重新导入本机 WorkBuddy 账号：重读凭据后立即刷新账号卡片与签到状态。 */
+function importWorkbuddyAccount(btn) {
+  if (BUSY) return;
+  const button = btn || $('btnWbImport');
+  if (button) button.disabled = true;
+  appendLog('正在重新导入 WorkBuddy 账号并刷新凭据…', 'cmd');
+  return call('workbuddy_import')
+    .then((r) => {
+      if (!r || r.ok === false) {
+        const reason = (r && (r.report || r.error)) || '未知错误';
+        appendLog('导入 WorkBuddy 账号失败：' + reason, 'err');
+        wbSetDot('exception', reason);
+        return;
+      }
+      appendLog('导入 WorkBuddy 账号：'
+        + (r.report || '已重新读取本机登录态'), 'ok');
+      refreshWorkbuddyAccount();
+    })
+    .catch((e) => {
+      appendLog('导入 WorkBuddy 账号调用失败：' + e, 'err');
+      wbSetDot('exception', String(e));
+    })
+    .finally(() => {
+      if (button) button.disabled = false;
+    });
+}
+
 function resetWbAccountPending() {
   if (!WB_ACCOUNT_PENDING) return;
   const btn = WB_ACCOUNT_PENDING;
+  const checked = wbClaimedToday();
   btn.classList.remove('confirm');
-  btn.textContent = '签到';
+  btn.textContent = checked ? '已签到' : '签到';
+  btn.disabled = checked;
   WB_ACCOUNT_PENDING = null;
 }
 
 /** 账号卡片签到：claim 为真实写操作，沿用二次确认；成功后补一次 status。 */
 function wbAccountClaim(btn) {
   if (!btn || BUSY) return;
+  if (wbClaimedToday()) return;
   if (WB_ACCOUNT_PENDING !== btn) {
     resetWbAccountPending();
     WB_ACCOUNT_PENDING = btn;
@@ -1372,61 +1615,62 @@ function showHint(text) {
   h.classList.toggle('show', !!text);
 }
 
+// 个别动作需要连续执行两条命令：签到后补一次只读 status，
+// 让顶部指标与本月日历立即反映刚领取的积分。
+const ACTION_CHAINS = {
+  claim: ['claim', 'status'],
+};
+
+function invokeAction(action) {
+  const chain = ACTION_CHAINS[action.key];
+  if (chain) {
+    runSeries(chain);
+    return;
+  }
+  run(action.key);
+}
+
 function buildActions(list) {
   const box = $('actGroup');
   box.innerHTML = '';
 
-  const readonly = list.filter((a) => !a.write);
-  const writing = list.filter((a) => a.write);
-
-  const add = (a, cls) => {
+  list.forEach((a) => {
     const b = document.createElement('button');
-    b.className = 'btn ' + cls;
+    b.className = 'btn ' + (a.write ? 'act' : 'primary');
     b.id = 'act-' + a.key;
     b.title = a.desc;
-    b.innerHTML = esc(a.label) + ' <code>' + esc(a.key) + '</code>';
+    b.textContent = a.label;
     b.addEventListener('mouseenter', () => showHint(a.desc));
     b.addEventListener('mouseleave', () => showHint());
     b.addEventListener('focus', () => showHint(a.desc));
     b.addEventListener('blur', () => showHint());
     b.addEventListener('click', () => onActionClick(a, b));
     box.appendChild(b);
-    return b;
-  };
-
-  readonly.forEach((a) => add(a, 'primary'));
-  if (writing.length) {
-    const sep = document.createElement('span');
-    sep.className = 'act-sep';
-    sep.textContent = '写操作';
-    box.appendChild(sep);
-    writing.forEach((a) => add(a, 'act'));
-  }
+  });
 }
 
 function onActionClick(action, btn) {
   // 已在等待确认且点的是同一个按钮 -> 确认执行
   if (PENDING && PENDING.key === action.key) {
     btn.classList.remove('confirm');
-    const key = PENDING.key;
     PENDING = null;
-    btn.innerHTML = esc(action.label) + ' <code>' + esc(key) + '</code>';
+    btn.textContent = action.label;
     appendLog('已确认执行：' + action.desc, 'warn');
-    run(key);
+    invokeAction(action);
     return;
   }
   // 点别的按钮：取消上一个待确认
   resetPending();
 
   if (!action.write) {
-    run(action.key);
+    invokeAction(action);
     return;
   }
 
   // 写操作二次确认
   PENDING = { key: action.key, btn: btn };
   btn.classList.add('confirm');
-  btn.innerHTML = '确认执行？ <code>点此</code>';
+  btn.textContent = '确认执行？';
   appendLog('待确认：' + action.desc + '（再次点击该按钮以执行）', 'warn');
   setTimeout(() => { if (PENDING) resetPending(); }, 8000);
 }
@@ -1436,7 +1680,7 @@ function resetPending() {
   const btn = PENDING.btn;
   btn.classList.remove('confirm');
   const a = state.actions.find((x) => x.key === PENDING.key);
-  if (a) btn.innerHTML = esc(a.label) + ' <code>' + esc(a.key) + '</code>';
+  if (a) btn.textContent = a.label;
   PENDING = null;
 }
 
@@ -1996,6 +2240,7 @@ let QODER_DATA = null;
 let QODER_SERVICE = null;
 let QODER_BUSY = false;
 let QODER_PENDING = null;
+let QODER_LAST_EVENT = null;
 let QODER_SVC_BUSY = false;
 let QODER_SVC_PENDING = null;
 let QODER_SVC_REFRESHING = false;
@@ -2029,8 +2274,9 @@ function setQoderDd(index, value, title) {
   dd.title = title || '';
 }
 
-function qoderSetDot(kind, detail) {
-  paintDot('qoderDot', kind, detail);
+function qoderSetDot(kind, detail, text) {
+  return paintSideEvent('qoderDot', 'qoderSideHint',
+    { kind, title: detail, text });
 }
 
 function renderQoderAccount(status, doctor) {
@@ -2148,8 +2394,11 @@ function renderQoderAccount(status, doctor) {
 
   const actions = document.createElement('div');
   actions.className = 'ta-actions';
-  actions.appendChild(accountActionButton('签到', '领取今日 Qoder Credits（真实写操作，需二次确认）',
-    qoderClaim, '', QODER_BUSY));
+  const checked = qoderClaimedToday(status);
+  actions.appendChild(accountActionButton(checked ? '已签到' : '签到',
+    checked ? '本周期已签到，无需重复领取'
+      : '领取今日 Qoder Credits（真实写操作，需二次确认）',
+    qoderClaim, '', QODER_BUSY || checked));
   actions.appendChild(accountActionButton('刷新', '重新查询 Qoder 账号与活动',
     () => refreshQoder(false), '', QODER_BUSY));
   card.appendChild(actions);
@@ -2352,46 +2601,147 @@ function qoderDotState(status, doctor, healthy, desktop) {
   return { kind, missing: false, title };
 }
 
-function qoderSideState(status, doctor, healthy) {
-  const hint = $('qoderSideHint');
-  if (!hint) return;
+function qoderCampaignSummary(status) {
+  const active = ((status && status.campaigns) || [])
+    .filter((c) => c && c.active);
+  return {
+    active,
+    todo: active.filter((c) => c.status === 'CLAIMABLE'),
+    claimed: active.filter((c) => c.status === 'CLAIMED'),
+  };
+}
 
-  const dot = qoderDotState(status, doctor, healthy, desktopInfo('qoder'));
+function qoderClaimed(status) {
+  if (!status) return false;
+  const result = String(status.result || '').toUpperCase();
+  if (result === 'CLAIMED' || result === 'ALREADY') return true;
+  const summary = qoderCampaignSummary(status);
+  return summary.todo.length === 0 && summary.claimed.length > 0;
+}
 
-  // 文字只表示本周期领取结果；状态点单独表示登录 / 连接状态。
-  let text = '未检测';
-  let claimTitle = '';
-  const campaigns = (status && status.campaigns) || [];
-  const todo = campaigns.filter((c) => c.active && c.status === 'CLAIMABLE');
-  const claimed = campaigns.filter((c) => c.active && c.status === 'CLAIMED');
-  if (status) {
-    if (todo.length) {
-      text = '未领取';
-      claimTitle = '可领取：' + todo.map((c) => c.campaign || '?').join('、');
-    } else if (claimed.length) {
-      text = '已领取';
-      claimTitle = '本周期已领取：'
-        + claimed.map((c) => c.campaign || '?').join('、');
-    } else if (status.result === 'OK') {
-      text = '已领取';
-      claimTitle = status.report || '当前没有可领取活动';
-    } else {
-      text = '未领取';
-      claimTitle = QODER_RESULT_LABEL[status.result] || status.result;
-    }
-  } else if (doctor) {
-    text = '未领取';
+/** 账号卡片用：当天领取成功过就保持「已签到」。 */
+function qoderClaimedToday(status) {
+  return qoderClaimed(status)
+    || !!(QODER_LAST_EVENT && QODER_LAST_EVENT.kind === 'ok'
+          && isToday(QODER_LAST_EVENT.at));
+}
+
+const QODER_FAIL_RESULTS = ['AUTH_REJECTED', 'FORBIDDEN', 'NETWORK',
+  'TIMEOUT', 'ERROR', 'AUTH_ERROR', 'UNKNOWN'];
+
+/** 侧边栏 Qoder 最新事件：图形和文字来自同一份领取结论。 */
+function qoderSideEvent(status, doctor, healthy) {
+  if (desktopMissing('qoder') && !(doctor && doctor.token_source === 'env')) {
+    return { kind: 'off', text: '未安装',
+             title: '本机未检测到 Qoder CN 桌面端（残留登录态不算连接成功）' };
   }
-  // 没查到活动又没登录时，说「未领取」会让人以为只是还没点按钮；
-  // 这里直接给出卡住的原因，和状态点的黄色对应。
-  const notLogged = (doctor && doctor.result === 'NO_AUTH')
-    || (status && status.result === 'NO_AUTH');
-  if (notLogged) text = '未登录';
-  if (dot.missing) text = '未安装';
 
-  hint.textContent = text;
-  hint.title = claimTitle || dot.title;
-  qoderSetDot(dot.kind, dot.title);
+  const result = String((status && status.result) || '').toUpperCase();
+  if (result === 'NO_AUTH') {
+    return { kind: 'warn', text: '未登录',
+             title: (status && status.report) || '已安装但未登录 Qoder CN' };
+  }
+  if (QODER_FAIL_RESULTS.indexOf(result) >= 0) {
+    return { kind: 'err', text: '签到失败，查看日志原因。',
+             title: (status && status.report)
+               || QODER_RESULT_LABEL[result] || result };
+  }
+
+  const summary = qoderCampaignSummary(status);
+  if (qoderClaimed(status)) {
+    return {
+      kind: 'ok',
+      text: statusSuccessText(qoderSum(summary.claimed, 'credits')),
+      title: (status && status.report) || 'Qoder 本周期已领取',
+    };
+  }
+
+  // status 查询成功只说明「当前还可领取 / 没有活动」，不能盖掉今天
+  // 刚发生的领取失败或成功结论。
+  if (QODER_LAST_EVENT && isToday(QODER_LAST_EVENT.at)) {
+    if (QODER_LAST_EVENT.kind === 'err'
+        || QODER_LAST_EVENT.kind === 'exception'
+        || QODER_LAST_EVENT.kind === 'ok') {
+      return QODER_LAST_EVENT;
+    }
+  }
+
+  if (status) {
+    if (result === 'INACTIVE') {
+      return { kind: 'warn', text: '领取活动未开启。',
+               title: status.report || result };
+    }
+    if (summary.todo.length) {
+      return {
+        kind: 'warn',
+        text: '今日尚未领取，点击签到领取 Credits。',
+        title: '可领取：'
+          + summary.todo.map((c) => c.campaign || '?').join('、'),
+      };
+    }
+    if (result === 'OK' || result === 'CLAIMED' || result === 'ALREADY') {
+      return { kind: 'warn', text: '当前没有可领取活动。',
+               title: status.report || '当前没有可领取活动' };
+    }
+    return { kind: 'exception',
+             title: status.report || ('未识别的领取状态：' + result) };
+  }
+
+  if (doctor) {
+    const dr = String(doctor.result || '').toUpperCase();
+    if (dr === 'NO_AUTH') {
+      return { kind: 'warn', text: '未登录',
+               title: doctor.report || '已安装但未登录 Qoder CN' };
+    }
+    if (dr === 'AUTH_REJECTED') {
+      return { kind: 'err', text: '签到失败，查看日志原因。',
+               title: doctor.report || 'Qoder CN 登录态已失效' };
+    }
+    if (dr === 'OK') {
+      return { kind: 'warn', text: '已登录，尚未领取今日 Credits。',
+               title: healthy ? 'Qoder 登录态可读' : (doctor.report || 'Qoder 登录态可读') };
+    }
+    if (dr === 'AUTH_ERROR' || dr === 'ERROR') {
+      return { kind: 'exception', title: doctor.report || dr };
+    }
+    return { kind: 'exception',
+             title: doctor.report || ('未识别的登录状态：' + dr) };
+  }
+
+  return { kind: 'busy', text: '正在检测…',
+           title: '尚未检测 Qoder 登录态' };
+}
+
+function qoderSideState(status, doctor, healthy) {
+  const event = qoderSideEvent(status, doctor, healthy);
+  qoderSetDot(event.kind, event.title, event.text);
+}
+
+/** 记录 Qoder 本轮领取结果；当天有效。 */
+function recordQoderOutcome(payload, exit, error) {
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const result = String(p.result || '').toUpperCase();
+  const report = p.report || p.error || error || result;
+  const at = Date.now();
+
+  if (result === 'NO_AUTH') {
+    QODER_LAST_EVENT = { kind: 'warn', text: '未登录', title: report, at };
+  } else if (result === 'INACTIVE' || result === 'PENDING') {
+    QODER_LAST_EVENT = { kind: 'warn', text: '领取活动未开启。', title: report, at };
+  } else if (result === 'CLAIMED' || result === 'ALREADY') {
+    QODER_LAST_EVENT = {
+      kind: 'ok', text: statusSuccessText(p.credits), title: report, at,
+    };
+  } else if (QODER_FAIL_RESULTS.indexOf(result) >= 0
+             || (exit !== 0 && result !== 'INACTIVE')) {
+    QODER_LAST_EVENT = {
+      kind: 'err', text: '签到失败，查看日志原因。', title: report, at,
+    };
+  } else if (result) {
+    QODER_LAST_EVENT = { kind: 'exception', title: report || result, at };
+  } else {
+    QODER_LAST_EVENT = null;
+  }
 }
 
 function renderQoder(data) {
@@ -2409,18 +2759,13 @@ function renderQoder(data) {
     renderQoderAccount(null, null);
     renderQoderCampaigns(null);
     renderQoderLog(QODER_DATA.log);
-    const missingScript = /未找到/.test(QODER_DATA.error || '');
-    const hint = $('qoderSideHint');
-    if (hint) {
-      hint.textContent = missingScript ? '不可用' : '未领取';
-      hint.title = QODER_DATA.busy
+    // 监控组件缺失或读取失败都属于异常，统一用蓝圈感叹号；具体原因
+    // 放在 title / 日志里，事件文案按需求使用固定兜底句。
+    qoderSetDot(QODER_DATA.busy ? 'busy' : 'exception',
+      QODER_DATA.busy
         ? '领取正在执行'
-        : (QODER_DATA.error || 'Qoder 监控不可用');
-    }
-    // 脚本缺失是「没装监控组件」，不是登录/网络异常：用灰点而不是红点，
-    // 红点会让人以为 Qoder 登录态坏了。
-    qoderSetDot(QODER_DATA.busy ? 'busy' : (missingScript ? 'off' : 'err'),
-                QODER_DATA.busy ? '' : (QODER_DATA.error || ''));
+        : (QODER_DATA.error || 'Qoder 监控不可用'),
+      QODER_DATA.busy ? '正在领取…' : STATUS_DEFAULT_TEXT.exception);
     if (!QODER_DATA.busy) {
       appendQoderLog('Qoder 监控不可用：' + (QODER_DATA.error || '未知错误'), 'err');
     }
@@ -2440,15 +2785,10 @@ function renderQoder(data) {
 function refreshQoder(silent) {
   if (QODER_LOADING) return Promise.resolve();
   QODER_LOADING = true;
-  const btns = [$('btnQoderRefresh'), $('btnQoderAccountRefresh')];
+  const btns = [$('btnQoderRefresh'), $('btnQoderAccountRefresh'), $('btnQoderImport')];
   btns.forEach((b) => { if (b) b.disabled = true; });
   if (!QODER_DATA) {
-    const hint = $('qoderSideHint');
-    if (hint) {
-      hint.textContent = '检测中…';
-      hint.title = '正在检测 Qoder CN 登录态并同步活动';
-    }
-    qoderSetDot('busy');
+    qoderSetDot('busy', '正在检测 Qoder CN 登录态并同步活动', '正在检测…');
   }
   if (!silent) appendQoderLog('正在读取 Qoder 账号、活动与日志…', 'meta');
   return call('qoder_monitor')
@@ -2469,6 +2809,33 @@ function refreshQoder(silent) {
     });
 }
 
+/** 重新导入本机 Qoder 账号：重读凭据后刷新账号与活动。 */
+function importQoderAccount(btn) {
+  if (QODER_LOADING || QODER_BUSY) return;
+  const button = btn || $('btnQoderImport');
+  if (button) button.disabled = true;
+  appendQoderLog('正在重新导入 Qoder CN 账号并刷新凭据…', 'cmd');
+  return call('qoder_import')
+    .then((r) => {
+      if (!r || r.ok === false) {
+        const reason = (r && (r.report || r.error)) || '未知错误';
+        appendQoderLog('导入 Qoder 账号失败：' + reason, 'err');
+        qoderSetDot('exception', reason);
+      } else {
+        appendQoderLog('导入 Qoder 账号：'
+          + (r.report || '已重新读取本机登录态'), 'ok');
+      }
+      return refreshQoder(false);
+    })
+    .catch((e) => {
+      appendQoderLog('导入 Qoder 账号调用失败：' + e, 'err');
+      qoderSetDot('exception', String(e));
+    })
+    .finally(() => {
+      if (button) button.disabled = false;
+    });
+}
+
 function qoderResetClaim() {
   if (!QODER_PENDING) return;
   const { btn, label } = QODER_PENDING;
@@ -2483,8 +2850,15 @@ function qoderSetClaimBusy(on) {
   QODER_BUSY = on;
   const top = $('btnQoderClaim');
   if (top) top.disabled = on;
+  const importer = $('btnQoderImport');
+  if (importer) importer.disabled = on;
+  const checked = qoderClaimedToday(QODER_DATA && QODER_DATA.status);
   document.querySelectorAll('#qoderAccounts .mini-btn').forEach((b) => {
-    b.disabled = on;
+    if (b.textContent === '签到' || b.textContent === '已签到') {
+      b.disabled = on || checked;
+    } else {
+      b.disabled = on;
+    }
   });
 }
 
@@ -2494,7 +2868,8 @@ function qoderClaim(eventOrBtn) {
   if (btn && btn.currentTarget) btn = btn.currentTarget;   // 顶栏按钮的事件对象
   if (!btn) btn = $('btnQoderClaim');
   if (!btn) return;
-  const label = btn.id === 'btnQoderClaim' ? '领取今日 Credits' : '签到';
+  const label = btn.id === 'btnQoderClaim' ? '领取今日 Credits'
+    : (qoderClaimedToday(QODER_DATA && QODER_DATA.status) ? '已签到' : '签到');
   const confirming = btn.id === 'btnQoderClaim';
   const confirmText = confirming ? '确认领取？点此执行' : '确认签到？点此执行';
   const confirmLog = confirming
@@ -2513,7 +2888,7 @@ function qoderClaim(eventOrBtn) {
 
   qoderResetClaim();
   qoderSetClaimBusy(true);
-  qoderSetDot('busy');
+  qoderSetDot('busy', '', '正在领取…');
   appendQoderLog('正在领取 Qoder 今日 Credits…', 'cmd');
   call('qoder_claim')
     .then((r) => {
@@ -2532,6 +2907,7 @@ function qoderClaim(eventOrBtn) {
 function onQoderDone(data) {
   qoderResetClaim();
   qoderSetClaimBusy(false);
+  if (data) recordQoderOutcome(data.payload, data.exit, data.error);
   const btn = $('btnQoderClaim');
   if (btn) {
     btn.textContent = '领取今日 Credits';
@@ -2806,6 +3182,7 @@ let TRAE_SERVICE = null;
 let TRAE_BUSY = false;
 let TRAE_BUSY_LABEL = '';
 let TRAE_PENDING = false;
+let TRAE_LAST_EVENT = null;
 let TRAE_EDIT_ID = null;
 let TRAE_ACCOUNT_PENDING = null;
 let TRAE_SVC_BUSY = false;
@@ -2833,6 +3210,18 @@ function traeFmt(value, digits) {
   });
 }
 
+/**
+ * 顶部「剩余积分」只显示整数部分。
+ * Windows 文本缩放 140% 时，卡片内容宽约 104px，完整的 3,509.69 需要
+ * 约 120px，会被省略号截成 3,50…；4/5 位整数在 30px 字号下仍能完整
+ * 显示。完整小数放在悬停提示里，账号卡片继续显示精确值。
+ */
+function traeFmtWhole(value) {
+  const n = traeNum(value);
+  if (n === null) return '—';
+  return Math.trunc(n).toLocaleString('zh-CN');
+}
+
 function traeLocalDate() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
@@ -2847,8 +3236,9 @@ function traeTimeText(ms) {
   return d.toLocaleString('zh-CN', { hour12: false });
 }
 
-function traeSetDot(kind, detail) {
-  paintDot('traeDot', kind, detail);
+function traeSetDot(kind, detail, text) {
+  return paintSideEvent('traeDot', 'traeSideHint',
+    { kind, title: detail, text });
 }
 
 function traeActive(data) {
@@ -3025,33 +3415,112 @@ function traeDotState(data, desktop) {
            title: 'Trae 登录态可用 · ' + enabled.length + ' 个启用账号' };
 }
 
-function traeSideState() {
-  const hint = $('traeSideHint');
-  if (!hint) return;
+/** 侧边栏 Trae 最新事件：直接反映今日签到进度或最近一次失败。 */
+function traeSideEvent() {
+  if (desktopMissing('trae')) {
+    return { kind: 'off', text: '未安装',
+             title: '本机未检测到 Trae 桌面端' };
+  }
+  const data = TRAE_DATA;
+  if (!data) {
+    return { kind: 'busy', text: '正在检测…',
+             title: '尚未检测 Trae 登录态' };
+  }
+  if (data.ok === false) {
+    return { kind: 'exception',
+             title: data.error || 'Trae 监控不可用' };
+  }
+  if (TRAE_BUSY) {
+    return {
+      kind: 'busy',
+      text: TRAE_BUSY_LABEL ? TRAE_BUSY_LABEL + '…' : '任务执行中…',
+      title: TRAE_BUSY_LABEL || 'Trae 任务正在执行',
+    };
+  }
 
-  // 状态点只表示登录 / 连接状态；文字统一为今日签到结果。
-  let text = '未检测';
-  let title = '';
-  const dot = traeDotState(TRAE_DATA, desktopInfo('trae'));
+  const accounts = data.accounts || [];
+  const enabled = accounts.filter((a) => a.enabled);
+  if (!accounts.length) {
+    return { kind: 'warn', text: '未登录',
+             title: '尚未导入 Trae 账号' };
+  }
+  if (!enabled.length) {
+    return { kind: 'warn', text: '未登录',
+             title: 'Trae 账号均已停用' };
+  }
 
-  if (TRAE_DATA && TRAE_DATA.ok !== false) {
-    const accounts = TRAE_DATA.accounts || [];
-    const enabled = accounts.filter((a) => a.enabled);
-    if (enabled.length) {
-      const today = traeToday();
-      const checked = enabled.filter((a) => traeIsChecked(a, today)).length;
-      text = checked >= enabled.length ? '已签到' : '未签到';
-      title = '今日已签 ' + checked + '/' + enabled.length;
-    } else {
-      text = '未签到';
+  const history = data.history || null;
+  const today = (history && history.today) || traeToday();
+  const checked = enabled.filter((a) => traeIsChecked(a, today));
+  if (checked.length >= enabled.length) {
+    return {
+      kind: 'ok',
+      text: statusSuccessText(history && history.today_credits),
+      title: '今日已签 ' + checked.length + '/' + enabled.length,
+    };
+  }
+
+  if (TRAE_LAST_EVENT && isToday(TRAE_LAST_EVENT.at)) {
+    if (TRAE_LAST_EVENT.kind === 'err'
+        || TRAE_LAST_EVENT.kind === 'exception'
+        || TRAE_LAST_EVENT.kind === 'ok') {
+      return TRAE_LAST_EVENT;
     }
   }
-  if (dot.missing) text = '未安装';
 
-  const kind = TRAE_BUSY ? 'busy' : dot.kind;
-  hint.textContent = text;
-  hint.title = title || dot.title;
-  traeSetDot(kind, TRAE_BUSY ? '' : dot.title);
+  const broken = enabled.filter((a) => a.token_expired && !a.has_session);
+  if (broken.length === enabled.length) {
+    return { kind: 'err', text: '签到失败，查看日志原因。',
+             title: '全部账号登录态已过期' };
+  }
+  if (broken.length) {
+    return { kind: 'err', text: '签到失败，查看日志原因。',
+             title: broken.length + ' 个账号登录态已过期' };
+  }
+  if (checked.length) {
+    return {
+      kind: 'warn',
+      text: '部分账号尚未签到。',
+      title: '今日已签 ' + checked.length + '/' + enabled.length,
+    };
+  }
+  return { kind: 'warn', text: '今日尚未签到，点击一键签到。',
+           title: '今日已签 0/' + enabled.length };
+}
+
+function traeSideState() {
+  const event = traeSideEvent();
+  traeSetDot(event.kind, event.title, event.text);
+}
+
+/** 记录 Trae 一键签到结果；当天有效。 */
+function recordTraeOutcome(kind, payload, exit, error) {
+  if (kind !== 'checkin') return;
+  const p = payload && typeof payload === 'object' ? payload : {};
+  const result = String(p.result || '').toUpperCase();
+  const report = p.report || p.error || error || result;
+  const at = Date.now();
+
+  if (result === 'NO_ACCOUNT' || result === 'NO_AUTH' || result === 'NO_CLIENT') {
+    TRAE_LAST_EVENT = { kind: 'warn', text: '未登录', title: report, at };
+  } else if (result === 'OK' || result === 'ALREADY'
+             || result === 'CLAIMED' || result === 'NO_CHANGE') {
+    TRAE_LAST_EVENT = {
+      kind: 'ok',
+      text: statusSuccessText(p.total_gained),
+      title: report,
+      at,
+    };
+  } else if (result === 'PARTIAL' || result === 'ERROR'
+             || exit !== 0) {
+    TRAE_LAST_EVENT = {
+      kind: 'err', text: '签到失败，查看日志原因。', title: report, at,
+    };
+  } else if (result) {
+    TRAE_LAST_EVENT = { kind: 'exception', title: report || result, at };
+  } else {
+    TRAE_LAST_EVENT = null;
+  }
 }
 
 function renderTraeCards(data) {
@@ -3069,8 +3538,10 @@ function renderTraeCards(data) {
     const todayCredits = history ? history.today_credits : 0;
     setCard('tToday', 'tTodayHint', traeFmt(todayCredits),
       traeIsChecked(active, today) ? '主号今日已签到' : '主号今日未签到');
-    setCard('tRemaining', 'tRemainingHint', traeFmt(active.remaining),
-      active.display + (accounts.length > 1 ? ' · 共 ' + accounts.length + ' 个账号' : ''));
+    const exactRemaining = traeFmt(active.remaining, 4);
+    setCard('tRemaining', 'tRemainingHint', traeFmtWhole(active.remaining),
+      active.display + (accounts.length > 1 ? ' · 共 ' + accounts.length + ' 个账号' : ''),
+      exactRemaining === '—' ? '' : '完整值 ' + exactRemaining);
   }
 
   setCard('tAccounts', 'tAccountsHint', enabled.length,
@@ -3088,9 +3559,9 @@ function renderTraeAccounts(data) {
     if (clients.length) {
       const names = clients.map((c) => c.name).join('、');
       traeEmpty(box, '检测到本机客户端（' + names + '），但尚未导入登录态。'
-        + '点击「导入本机登录态」，或「添加账号」粘贴 Token / 会话 Cookie。');
+        + '点击「导入账号」，或「添加账号」粘贴 Token / 会话 Cookie。');
     } else {
-      traeEmpty(box, '还没有 Trae 账号。安装并登录 Trae 桌面端后可导入本机登录态，'
+      traeEmpty(box, '还没有 Trae 账号。安装并登录 Trae 桌面端后可导入账号，'
         + '也可以直接粘贴 Cloud-IDE-JWT Token 或 X-Cloudide-Session。');
     }
     return;
@@ -3628,12 +4099,7 @@ function refreshTrae(silent) {
   const btn = $('btnTraeRefresh');
   if (btn) btn.disabled = true;
   if (!TRAE_DATA) {
-    const hint = $('traeSideHint');
-    if (hint) {
-      hint.textContent = '检测中…';
-      hint.title = '正在检测 Trae 本机登录态并同步账号';
-    }
-    traeSetDot('busy');
+    traeSetDot('busy', '正在检测 Trae 本机登录态并同步账号', '正在检测…');
   }
   if (!silent) appendTraeLog('正在读取 Trae 账号、签到历史、用量与日志…', 'meta');
   return call('trae_monitor')
@@ -3688,7 +4154,8 @@ function setTraeBusy(on, label) {
   document.querySelectorAll('#traeAccounts [data-trae-action]').forEach((b) => {
     b.disabled = on;
   });
-  if (on) traeSetDot('busy');
+  if (on) traeSetDot('busy', TRAE_BUSY_LABEL || 'Trae 任务正在执行',
+    (TRAE_BUSY_LABEL || '任务执行中') + '…');
   else traeSideState();
 }
 
@@ -3725,7 +4192,7 @@ function startTraeTask(kind, accountId, days) {
     checkin: '正在签到',
     refresh: '正在刷新账号状态',
     usage: '正在同步用量',
-    import: '正在导入本机登录态',
+    import: '正在导入账号',
   };
   const label = labels[kind] || kind;
   setTraeBusy(true, label + '…');
@@ -3753,7 +4220,7 @@ function startTraeTask(kind, accountId, days) {
 
 function traeRefreshAccounts() {
   if (!(TRAE_DATA && (TRAE_DATA.accounts || []).length)) {
-    appendTraeLog('还没有 Trae 账号，请先导入本机登录态或添加账号', 'warn');
+    appendTraeLog('还没有 Trae 账号，请先导入账号或添加账号', 'warn');
     return;
   }
   startTraeTask('refresh', null);
@@ -3841,10 +4308,11 @@ function traeAccountAction(action, id) {
 }
 
 function onTraeDone(data) {
-  setTraeBusy(false);
-  traeResetCheckin();
   const kind = data && data.kind ? data.kind : '';
   const payload = data && data.payload ? data.payload : null;
+  recordTraeOutcome(kind, payload, data && data.exit, data && data.error);
+  setTraeBusy(false);
+  traeResetCheckin();
 
   if (payload && kind === 'usage' && Array.isArray(payload.expiring)) {
     TRAE_EXPIRING = payload.expiring;
@@ -4428,9 +4896,7 @@ async function boot(api) {
   sp.classList.toggle('bad', !info.signin_exists);
   sp.title = info.signin;
   if (!info.signin_exists) {
-    const hint = $('wbSideHint');
-    if (hint) hint.textContent = '缺少 signin.py';
-    wbSetDot('off', '缺少 signin.py，WorkBuddy 监控不可用');
+    wbSetDot('exception', '缺少 signin.py，WorkBuddy 监控不可用');
     appendLog('未找到 signin.py。', 'err');
     appendLog('程序按以下顺序找过（都不存在）：', 'meta');
     (info.signin_searched || []).forEach((p) => appendLog('  ' + p, 'meta'));
@@ -4505,15 +4971,11 @@ async function boot(api) {
   scheduleIntegrationPrefetch(info);
 
   if (!info.qoder_exists) {
-    const hint = $('qoderSideHint');
-    if (hint) hint.textContent = '缺少 qoder_signin.py';
-    qoderSetDot('off', '缺少 qoder_signin.py，Qoder 监控不可用');
+    qoderSetDot('exception', '缺少 qoder_signin.py，Qoder 监控不可用');
     appendLog('未找到 qoder_signin.py，Qoder 监控页不可用。', 'warn');
   }
   if (!info.trae_exists) {
-    const hint = $('traeSideHint');
-    if (hint) hint.textContent = '缺少 trae_signin.py';
-    traeSetDot('off', '缺少 trae_signin.py，Trae 监控不可用');
+    traeSetDot('exception', '缺少 trae_signin.py，Trae 监控不可用');
     setTraeAvailability(false);
     appendLog('未找到 trae_signin.py，Trae 监控页不可用。'
       + '请把脚本放到 exe 同目录。', 'warn');
@@ -4540,8 +5002,8 @@ async function boot(api) {
 document.addEventListener('DOMContentLoaded', function () {
   // 首屏内联脚本已经上色，这里只同步菜单选中项
   applyThemeMode(state.themeMode);
+  paintStaticDots();
 
-  $('btnClear').addEventListener('click', clearLog);
   $('btnCopy').addEventListener('click', copyLog);
   $('themeToggle').addEventListener('click', toggleThemeMenu);
   $('themeMenu').addEventListener('click', (e) => {
@@ -4557,10 +5019,10 @@ document.addEventListener('DOMContentLoaded', function () {
     setThemeMenu(false);
     $('themeToggle').focus();
   });
-  $('btnGrowth').addEventListener('click', () => loadGrowth(false));
   $('btnGrowthRefresh').addEventListener('click', () => loadGrowth(false));
   $('btnStatusRefresh').addEventListener('click', refreshStatus);
   $('btnCalRefresh').addEventListener('click', refreshStatus);
+  $('btnWbImport').addEventListener('click', (e) => importWorkbuddyAccount(e.currentTarget));
   $('btnWbAccountRefresh').addEventListener('click', refreshWorkbuddyAccount);
 
   $('btnSvcRefresh').addEventListener('click', () => refreshService(false));
@@ -4573,6 +5035,7 @@ document.addEventListener('DOMContentLoaded', function () {
   });
 
   $('btnQoderRefresh').addEventListener('click', () => refreshQoder(false));
+  $('btnQoderImport').addEventListener('click', (e) => importQoderAccount(e.currentTarget));
   $('btnQoderAccountRefresh').addEventListener('click', () => refreshQoder(false));
   $('btnQoderClaim').addEventListener('click', qoderClaim);
   $('btnQoderLogClear').addEventListener('click', () => {
