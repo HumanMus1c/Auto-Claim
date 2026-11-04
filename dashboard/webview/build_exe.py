@@ -46,6 +46,18 @@ def run(label, args, cwd=None):
     return p.returncode
 
 
+def optional_js_test(label, filename):
+    """运行本地测试脚本；脚本不存在时跳过。
+
+    这类测试文件不纳入版本控制，新克隆里没有，不能因此阻断打包。
+    """
+    path = os.path.join(HERE, filename)
+    if not os.path.isfile(path):
+        print("\n--- %s ---\n（本地测试脚本不存在，跳过）" % label, flush=True)
+        return 0
+    return run(label, ["node", path])
+
+
 def pre_checks():
     failed = []
 
@@ -61,16 +73,14 @@ def pre_checks():
     if run("JS 语法检查", ["node", "--check", js]) != 0:
         failed.append("app.js 语法错误")
 
-    js_test = os.path.join(HERE, "test_status_event.js")
-    if run("前端事件回归测试", ["node", js_test]) != 0:
+    if optional_js_test("前端事件回归测试", "test_status_event.js") != 0:
         failed.append("前端事件回归测试未通过")
 
     js_alert = os.path.join(HERE, "test_service_alert.js")
     if run("计划任务失败提示回归测试", ["node", js_alert]) != 0:
         failed.append("计划任务失败提示回归测试未通过")
 
-    js_dots = os.path.join(HERE, "test_side_dots.js")
-    if run("侧边栏状态点回归测试", ["node", js_dots]) != 0:
+    if optional_js_test("侧边栏状态点回归测试", "test_side_dots.js") != 0:
         failed.append("侧边栏状态点回归测试未通过")
 
     if run("重复代码检查", [PY, os.path.join(HERE, "check_dup.py")]) != 0:

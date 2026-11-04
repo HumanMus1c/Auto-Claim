@@ -59,7 +59,7 @@ datas = [
 |---|---|---|
 | 打包前 | `app.py` / `win_guard.py` / `trae_signin.py` / `client_launcher.py` 语法 | `python -m py_compile` |
 | 打包前 | `app.js` 语法 | `node --check` |
-| 打包前 | 前端事件回归（命令完成不清空无关数据） | `test_status_event.js` |
+| 打包前 | 前端事件回归（命令完成不清空无关数据，本地测试脚本存在时） | `test_status_event.js`、`test_side_dots.js` |
 | 打包前 | 函数体内重复代码 / 语法 | `check_dup.py`（AST） |
 | 打包前 | 样式表关键选择器齐全 | `check_css.py` |
 | 打包前 | 冻结路径 / 单实例 / 原生图标 | `test_locate_signin.py`、`test_win_guard.py`、`test_win_icon.py` |
@@ -68,6 +68,8 @@ datas = [
 | 打包后 | 资源与本地逐字节一致 | `verify_assets.py` |
 
 前两项是为了拦「批量改代码时改坏一块」，后两项是为了拦「exe 与源码不同步」。
+
+`test_status_event.js`、`test_side_dots.js` 等本地测试脚本不纳入版本控制：存在时执行，缺失时跳过，不影响新克隆打包。新建测试脚本请使用 `test_*.py` / `test_*.js` 命名，`.gitignore` 会直接忽略。
 
 ## verify_exe.py：怎么确认 exe 里是本次的代码
 
