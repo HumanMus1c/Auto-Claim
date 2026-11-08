@@ -94,7 +94,7 @@ def pre_checks():
                         "test_win_service", "test_win_icon",
                         "test_win_geometry", "test_trae_backend",
                         "test_data_dir", "test_service_recovery",
-                        "test_schedule_jitter"]) != 0:
+                        "test_schedule_jitter", "test_idle_trigger"]) != 0:
         failed.append("单元测试未通过")
 
     return failed
@@ -129,7 +129,8 @@ def post_check():
         (SPEC, SPEC),
     ]
     for name in ("win_theme.py", "win_title.py", "win_guard.py",
-                 "win_service.py", "schedule_jitter.py", "win_icon.py"):
+                 "win_service.py", "schedule_jitter.py", "idle_trigger.py",
+                 "win_icon.py"):
         paths.append((os.path.join(DASHBOARD, name), "dashboard/" + name))
     paths.append((os.path.join(REPO, "client_launcher.py"), "client_launcher.py"))
     for path, label in paths:

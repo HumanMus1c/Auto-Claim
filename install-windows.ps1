@@ -149,9 +149,19 @@ function Get-JitteredTime {
 }
 
 $taskRows = @(
-    @{ Name = "WorkBuddyAutoSignin"; When = "每天 7 次（随机时刻）"; What = "签到 + 成长中心" },
-    @{ Name = "WorkBuddyGrowthPoll"; When = "每天 6 次（随机时刻）"; What = "补签 + 成长中心全套" }
+    @{ Name = "WorkBuddyAutoSignin"; When = "每天 7 次（随机时刻）+ 空闲补跑"; What = "签到 + 成长中心" },
+    @{ Name = "WorkBuddyGrowthPoll"; When = "每天 6 次（随机时刻）+ 空闲补跑"; What = "补签 + 成长中心全套" }
 )
+
+# 空闲触发器：New-ScheduledTaskTrigger 没有空闲类型，只能直接造 CIM 实例。
+# 它和每天的随机时刻并行：机器睡过整组时刻、或断电重启后，只要空闲下来
+# 就会补跑一次。是否重复由脚本里的 idle_trigger 闸门判断（30 分钟内成功跑过跳过）。
+# 下面的 IdleDuration 只是让任务 UI 的数字和真实行为一致：Windows 8 以后该字段
+# 已弃用，真正生效的是系统按「4 分钟无输入 + CPU/磁盘不忙」判定。
+function New-IdleTrigger {
+    return New-CimInstance -CimClass (Get-CimClass -ClassName MSFT_TaskIdleTrigger `
+        -Namespace Root/Microsoft/Windows/TaskScheduler) -ClientOnly
+}
 $registeredTasks = @()
 $verifiedTasks = @()
 $operation = "创建"
@@ -179,7 +189,11 @@ try {
     }
     $set1 = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden `
             -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries `
-            -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -ErrorAction Stop
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+            -IdleDuration (New-TimeSpan -Minutes 4) `
+            -IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd -ErrorAction Stop
+    # 空闲触发与随机时刻并行：随机时刻负责分散，空闲触发负责兜底
+    $tri1 += New-IdleTrigger
     Register-ScheduledTask -TaskName $currentTask -TaskPath "\" `
         -Action $act1 -Trigger $tri1 -Settings $set1 -Principal $principal `
         -Description "WorkBuddy daily auto signin (silent, zero token)" -Force -ErrorAction Stop | Out-Null
@@ -203,7 +217,10 @@ try {
     $act2 = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$signin`" silent-poll" -ErrorAction Stop
     $set2 = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden `
             -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries `
-            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -ErrorAction Stop
+            -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+            -IdleDuration (New-TimeSpan -Minutes 4) `
+            -IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd -ErrorAction Stop
+    $tri2 += New-IdleTrigger
     Register-ScheduledTask -TaskName $currentTask -TaskPath "\" `
         -Action $act2 -Trigger $tri2 -Settings $set2 -Principal $principal `
         -Description "WorkBuddy poll (catch-up signin + growth center)" -Force -ErrorAction Stop | Out-Null

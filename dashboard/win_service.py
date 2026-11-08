@@ -15,6 +15,15 @@ Qoder CN 使用另一个独立任务，互不影响：
 每个点在它自己跑完的当天被换掉、第二天生效，因此第二天零点时整组时刻
 已经全部是新的。
 
+**每个任务还挂了一条空闲触发器**（MSFT_TaskIdleTrigger）：机器空闲下来就
+补跑一次，和随机时刻并行。随机时刻负责分散、避免固定模式，空闲触发负责
+兜底——笔记本合盖睡一整天、断电重启后整组时刻全被跳过时，只要机器醒着且
+没人用它，当天仍然会补上一次。是否重复由 idle_trigger 的本地冷却决定
+（30 分钟内成功跑过就不再跑），这里只负责把触发器注册进去。
+
+空闲的判定不在我们手里：Windows 8 以后由系统电源子系统按「4 分钟无键鼠输入
++ CPU/磁盘不忙」判断（任务 XML 里的 IdleDuration 字段已弃用，实际不生效）。
+
 本模块只通过 PowerShell 的 ScheduledTasks 模块操作这些任务；任务名、
 触发器和动作全部来自下面的常量，前端不能传入任意命令。
 
@@ -40,6 +49,12 @@ except ImportError:
     # 冻结后 sys.path 不一定包含 dashboard/，按本文件位置补一次
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import schedule_jitter
+
+try:
+    import idle_trigger
+except ImportError:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import idle_trigger
 
 # 轮询基准点。随机化只在这些基准点附近浮动，不改变「一天覆盖 6 个时段」
 # 的结构。刻意用 6 个独立的 Daily 触发器，而不是「Daily + 每 4 小时重复」：
@@ -131,6 +146,25 @@ ACTIONS = ("enable", "disable", "run", "stop", "uninstall")
 
 CREATE_NO_WINDOW = 0x08000000
 
+# 空闲触发器：New-ScheduledTaskTrigger 没有空闲类型，只能直接造 CIM 实例。
+# 注册进任务后它和 Daily 触发器并列存在，谁先满足条件谁点火。
+IDLE_TRIGGER_PS = (
+    "New-CimInstance -CimClass (Get-CimClass -ClassName "
+    "MSFT_TaskIdleTrigger -Namespace Root/Microsoft/Windows/TaskScheduler) "
+    "-ClientOnly")
+
+# 空闲设置：
+#   IdleDuration  —— Windows 8 以后已弃用（实际由系统按「4 分钟无输入 +
+#                    CPU/磁盘不忙」判定），仍写进去只为让任务 XML 与任务
+#                    计划程序 UI 显示的数字和真实行为一致
+#   WaitTimeout   —— 对空闲触发的任务同样被忽略，保留只为 UI 显示
+#   DontStopOnIdleEnd —— 用户回到键鼠前不杀任务。默认值是「出空闲就停」，
+#                     签到可能正写到一半，被杀会留下半份结果和一条失败记录。
+IDLE_SETTINGS_PS = (
+    "-IdleDuration (New-TimeSpan -Minutes %d) "
+    "-IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd"
+    % idle_trigger.IDLE_MINUTES)
+
 
 def random_times(spec):
     """按 spec 的基准点生成一整套随机时刻（安装/修复时用）。
@@ -142,19 +176,23 @@ def random_times(spec):
         base, spec["name"], forward=bool(spec.get("forward")))
 
 
-def _when_text(spec, times):
+def _when_text(spec, times, idle=False):
     """卡片第一行的「什么时候跑」，带上实际时刻。
 
     时刻是随机生成的，写死成「每天 00:05」就是在骗人——任务其实每天都不
     在同一分钟醒。卡片宽度放不下 6 个时刻（`.svc-line` 是 nowrap + 省略号），
     所以这里只露前两个，完整排期由前端放进 title。
+
+    ``idle=True`` 表示任务里确实挂着空闲触发器（从任务回读，不是常量），
+    在末尾补一句，免得用户以为只有那几个随机时刻。
     """
     label = spec.get("when") or ""
+    suffix = " · 空闲补跑" if idle else ""
     if not times:
-        return label
+        return label + suffix
     head = " / ".join(times[:2])
     more = "" if len(times) <= 2 else " 等 %d 个时刻" % len(times)
-    return "%s（%s%s）" % (label, head, more)
+    return "%s（%s%s）%s" % (label, head, more, suffix)
 
 
 def _as_text_list(value):
@@ -401,6 +439,10 @@ try {
         $times = @($t.Triggers | ForEach-Object {
             if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
         } | Sort-Object)
+        # 空闲触发器没有 StartBoundary，靠类型名单独认；旧版任务没有这一条
+        $idle = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskIdleTrigger'
+        }).Count -gt 0
         $tasks += [pscustomobject]@{
             name = $n
             installed = $true
@@ -411,6 +453,7 @@ try {
             last_result = $result
             action = ($actions -join '; ')
             times = @($times)
+            idle = $idle
         }
     }
     [pscustomobject]@{ ok = $true; tasks = $tasks } |
@@ -437,6 +480,7 @@ def _empty_tasks(specs=TASKS):
             "next_run": None,
             "last_result": None,
             "action": "",
+            "idle": False,
         }
         for item in specs
     ]
@@ -472,7 +516,8 @@ def _normalize_status(raw, log_path=None, specs=TASKS):
         tasks.append({
             "name": name,
             "label": spec.get("label", name),
-            "when": _when_text(spec, _as_text_list(item.get("times"))),
+            "when": _when_text(spec, _as_text_list(item.get("times")),
+                               idle=bool(item.get("idle"))),
             "times": _as_text_list(item.get("times")),
             "what": spec.get("what", ""),
             "installed": installed,
@@ -483,6 +528,7 @@ def _normalize_status(raw, log_path=None, specs=TASKS):
             "next_run": None if state == "Disabled" else item.get("next_run"),
             "last_result": result,
             "action": item.get("action") or "",
+            "idle": bool(installed and item.get("idle")),
         })
 
     # PowerShell 输出不完整时也保证清单里的任务都出现在界面上
@@ -578,12 +624,15 @@ def _install_script(runner, prefix_args, workdir):
             "-Argument %s -WorkingDirectory $wd" % _ps_quote(args),
             "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
             "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
-            "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
+            "-ExecutionTimeLimit (New-TimeSpan -Minutes %d) %s"
+            % (spec["minutes"], IDLE_SETTINGS_PS),
             # 每个基准点各自随机，注册后时刻就固定下来，直到下次运行后的重排
             "    $triggers = @()",
             "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
             "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
             "    }",
+            # 空闲触发与随机时刻并行：睡过整组时刻时由它兜底
+            "    $triggers += %s" % IDLE_TRIGGER_PS,
             "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
             "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
             "-Description %s -Force | Out-Null"
@@ -605,7 +654,7 @@ def _install_script(runner, prefix_args, workdir):
         "    }",
         "    [pscustomobject]@{",
         "        ok = $true",
-        "        message = '已安装并启用 2 个计划任务（WorkBuddyAutoSignin / WorkBuddyGrowthPoll），触发时刻已随机化'",
+        "        message = '已安装并启用 2 个计划任务（WorkBuddyAutoSignin / WorkBuddyGrowthPoll），触发时刻已随机化并启用空闲补跑'",
         "        tasks = $verified",
         "    } | ConvertTo-Json -Depth 5 -Compress",
         "} catch {",
@@ -973,11 +1022,13 @@ def _single_task_script(exe, args, workdir, spec, times, message):
         "-WorkingDirectory $wd" % _ps_quote(args),
         "    $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden "
         "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
-        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d)" % spec["minutes"],
+        "-ExecutionTimeLimit (New-TimeSpan -Minutes %d) %s"
+        % (spec["minutes"], IDLE_SETTINGS_PS),
         "    $triggers = @()",
         "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
         "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
         "    }",
+        "    $triggers += %s" % IDLE_TRIGGER_PS,
         "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
         "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
         "-Description %s -Force | Out-Null"
@@ -1023,7 +1074,7 @@ def _install_single_task(signin_name, signin_path, spec, times,
                                       runner_args=runner_args)
     times = list(times)
     runtime = RUNTIME_LABEL.get(source, source)
-    message = "%s 已安装并启用（每天 %s，使用%s）" % (
+    message = "%s 已安装并启用（每天 %s + 空闲补跑，使用%s）" % (
         spec["name"], " / ".join(times), runtime)
 
     raw = _parse_json(_run_ps(
@@ -1195,9 +1246,15 @@ try {
         $times = @($t.Triggers | ForEach-Object {
             if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
         } | Sort-Object)
+        # 空闲触发器没有 StartBoundary，靠类型名单独认。旧版任务没有这一条，
+        # 重排时顺手补上——这就是「装过旧版的人不用重新安装也能升级」的路径。
+        $idle = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskIdleTrigger'
+        }).Count -gt 0
         $out += [pscustomobject]@{
             name = $n
             times = @($times)
+            idle = $idle
             exe = [string]$act.Execute
             args = [string]$act.Arguments
             workdir = [string]$act.WorkingDirectory
@@ -1217,6 +1274,10 @@ def _rewrite_times_script(changes):
 
     参数走 base64 传，避免路径里的引号、中文和反斜杠在 PowerShell 里
     层层转义；报错几乎都出在这一步。
+
+    **重排必须把空闲触发器一起写回去**：这里是从零重建任务定义，漏掉它
+    就等于每跑完一次就把兜底机制删掉。顺带也是旧任务的升级路径——早期
+    安装的任务只有 Daily 触发器，下一次重排会自动补上空闲触发。
     """
     payload = json.dumps(changes, ensure_ascii=False)
     encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
@@ -1236,12 +1297,13 @@ try {
         foreach ($t in @($item.times)) {
             $triggers += New-ScheduledTaskTrigger -Daily -At $t
         }
+        $triggers += %s
         if ($item.workdir) {
             $a = New-ScheduledTaskAction -Execute $item.exe -Argument $item.args -WorkingDirectory $item.workdir
         } else {
             $a = New-ScheduledTaskAction -Execute $item.exe -Argument $item.args
         }
-        $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes ([int]$item.minutes))
+        $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes ([int]$item.minutes)) %s
         Register-ScheduledTask -TaskName $item.name -TaskPath '\' -Action $a -Trigger $triggers -Settings $s -Principal $principal -Description $item.description -Force | Out-Null
         $done += $item.name
     }
@@ -1251,7 +1313,7 @@ try {
     [pscustomobject]@{ ok = $false; error = $_.Exception.Message } |
         ConvertTo-Json -Compress
 }
-""" % encoded
+""" % (encoded, IDLE_TRIGGER_PS, IDLE_SETTINGS_PS)
 
 
 def _norm_path(value):
@@ -1290,6 +1352,9 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
     ``kind`` 取 ``workbuddy`` / ``qoder`` / ``trae``。同一个进程内只重排一次
     （见 ``RESHUFFLED_IN_PROCESS``）；``force=True`` 供「安装 / 修复」后
     立即重排，也用来在同一个进程里重复验证。
+
+    顺带承担「旧任务升级」：读出任务时如果发现没有空闲触发器，即使时刻
+    没变也会重写一次把它补上——装过旧版的机器不用重新点「安装 / 修复」。
     """
     if not supported():
         return _reshuffle_error("计划任务管理仅支持 Windows")
@@ -1322,7 +1387,9 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
             new = schedule_jitter.reshuffle(
                 old, spec["name"], base=base, now=now,
                 forward=bool(spec.get("forward")))
-            if new == old:
+            # 旧版任务没有空闲触发器：即使时刻没变也要重写一次，把它补上
+            idle_added = not bool(item.get("idle"))
+            if new == old and not idle_added:
                 continue
             changes.append({
                 "name": spec["name"],
@@ -1335,7 +1402,8 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
                 "description": spec.get("description") or "",
                 "times": new,
             })
-            summary.append({"name": spec["name"], "old": old, "new": new})
+            summary.append({"name": spec["name"], "old": old, "new": new,
+                            "idle_added": idle_added})
         if changes:
             _run_ps_json(_rewrite_times_script(changes), timeout=60)
     except Exception as exc:
@@ -1360,12 +1428,16 @@ def apply_jitter_after_run(kind, data_dir=None):
     except Exception as exc:
         outcome = {"ok": False, "changed": [], "error": "%s" % exc}
     if outcome.get("changed"):
-        preview = "; ".join(
-            "%s %s→%s" % (item["name"], "/".join(item["old"]),
-                          "/".join(item["new"]))
-            for item in outcome["changed"])
+        parts = []
+        for item in outcome["changed"]:
+            if item["old"] == item["new"]:
+                parts.append("%s 已补上空闲触发器" % item["name"])
+            else:
+                parts.append("%s %s→%s" % (item["name"], "/".join(item["old"]),
+                                           "/".join(item["new"])))
         _append_console_log(
-            "[jitter] %s 触发时刻已重排：%s" % (kind, preview), data_dir)
+            "[jitter] %s 触发时刻已重排：%s" % (kind, "; ".join(parts)),
+            data_dir)
     elif not outcome.get("ok"):
         _append_console_log("[jitter] %s 重排失败：%s"
                             % (kind, outcome.get("error")), data_dir)

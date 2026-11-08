@@ -60,6 +60,20 @@ try:
 except Exception:  # 单独拷走 signin.py 时仍可运行，只是不会自动拉起客户端
     client_launcher = None
 
+try:
+    import idle_trigger
+except Exception:
+    # 计划任务可能直接跑 pythonw signin.py，此时 dashboard/ 不在 sys.path 上
+    _dashboard_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "dashboard")
+    if os.path.isdir(_dashboard_dir) and _dashboard_dir not in sys.path:
+        sys.path.insert(0, _dashboard_dir)
+    try:
+        import idle_trigger
+    except Exception:
+        # 少了它只是没有空闲补跑去重，签到本身必须照常
+        idle_trigger = None
+
 DEFAULT_ENDPOINT = "https://copilot.tencent.com"
 AUTH_BASENAME = os.path.join("CodeBuddyExtension", "Data", "Public", "auth", "workbuddy-desktop.info")
 # Linux 没有桌面端，入口是 CodeBuddy CLI；它写出的凭据文件名不同、放在 XDG 数据目录
@@ -101,6 +115,13 @@ _config_warning = None   # 配置非法时的告警，由 emit 统一带进输�
 # 轮询类命令：预算更短，且空跑不落盘。silent-growth 是 silent-poll 的旧名，
 # 已安装的计划任务还在用它，必须继续认。
 POLL_ACTIONS = ("silent-poll", "silent-growth")
+
+# 计划任务给任务挂了一条「空闲触发」：机器空闲就立刻补跑一次，兜住睡过头 /
+# 断电后整组随机时刻全部错过的情形。去重只认计划任务使用的动作——手工跑
+# auto / status 时用户就在机器前，不可能被空闲触发，也不该被挡住。
+IDLE_ACTIONS = ("silent",) + POLL_ACTIONS
+# 会产生一次真实签到结果的动作，跑完记下成败供空闲补跑判断
+RECORD_ACTIONS = ("auto",) + IDLE_ACTIONS
 
 AUTH_HELPER_TIMEOUT = 10.0
 AUTH_INPUT_LIMIT = 65536
@@ -1777,7 +1798,48 @@ def main():
         return 2
 
 
+def _idle_skip(action):
+    """空闲触发 + 最近刚跑过 → 直接返回。
+
+    判断放在一切动作之前：拉起桌面端、解凭据、发请求都在这之后，跳过时
+    一个都不该发生。任何异常都按「不跳过」处理。
+    """
+    if idle_trigger is None or action not in IDLE_ACTIONS:
+        return False
+    try:
+        if idle_trigger.should_skip("workbuddy"):
+            idle_trigger.log("WorkBuddy 空闲补跑：刚跑过（冷却中），跳过")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _record_idle(action, code):
+    """记下这次真实签到的结果，供空闲补跑判断；永不抛错。"""
+    if idle_trigger is None or action not in RECORD_ACTIONS:
+        return
+    try:
+        idle_trigger.record("workbuddy", code == 0)
+    except Exception:
+        pass
+
+
 def _run(action):
+    """公开入口：空闲补跑去重 + 记录结果，实际流程在 _run_action()。"""
+    if _idle_skip(action):
+        return 0
+    try:
+        code = _run_action(action)
+    except BaseException:
+        # 异常也是失败，下一次空闲补跑应该继续尝试
+        _record_idle(action, 1)
+        raise
+    _record_idle(action, code)
+    return code
+
+
+def _run_action(action):
     _start_budget(action)
     known = ("auto", "silent", "growth", "silent-poll", "silent-growth", "status", "claim", "all", "doctor")
     if action not in known:

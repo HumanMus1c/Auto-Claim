@@ -58,6 +58,24 @@ try:
 except Exception:  # 单独拷走 trae_signin.py 时仍可运行
     client_launcher = None
 
+try:
+    import idle_trigger
+except Exception:
+    # 计划任务可能直接跑 pythonw trae_signin.py，此时 dashboard/ 不在 sys.path
+    _dashboard_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "dashboard")
+    if os.path.isdir(_dashboard_dir) and _dashboard_dir not in sys.path:
+        sys.path.insert(0, _dashboard_dir)
+    try:
+        import idle_trigger
+    except Exception:
+        idle_trigger = None
+
+# 空闲补跑：计划任务除了随机时刻还挂着空闲触发器，机器空闲就补一次；
+# 只在 silent（计划任务）动作上去重，手工 auto / status 永远照常执行。
+IDLE_ACTIONS = ("silent",)
+RECORD_ACTIONS = ("auto", "silent")
+
 VERSION = "1.0.0"
 
 BASE_URL = "https://api.trae.cn"
@@ -2633,7 +2651,51 @@ def _ensure_client_running():
         pass
 
 
+def _idle_skip(action):
+    """空闲触发 + 最近刚跑过 → 直接返回，不读账号、不发请求。"""
+    if idle_trigger is None or action not in IDLE_ACTIONS:
+        return False
+    try:
+        if idle_trigger.should_skip("trae"):
+            idle_trigger.log("Trae 空闲补跑：刚跑过（冷却中），跳过")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _record_idle(action, code):
+    if idle_trigger is None or action not in RECORD_ACTIONS:
+        return
+    try:
+        idle_trigger.record("trae", code == 0)
+    except Exception:
+        pass
+
+
+def _idle_skipped():
+    """这次是否被空闲补跑闸门挡下；挡住时不重排触发时刻。"""
+    try:
+        return bool(idle_trigger and idle_trigger.skipped("trae"))
+    except Exception:
+        return False
+
+
 def run(action, account_id=None, days=None):
+    """公开入口：空闲补跑去重 + 记录结果，实际流程在 _run_action()。"""
+    if _idle_skip(action):
+        return 0
+    try:
+        code = _run_action(action, account_id=account_id, days=days)
+    except BaseException:
+        # 异常也算失败，下一次空闲补跑继续尝试
+        _record_idle(action, 1)
+        raise
+    _record_idle(action, code)
+    return code
+
+
+def _run_action(action, account_id=None, days=None):
     action = (action or "auto").lower()
     # 只有计划任务使用的 silent 动作才自动拉起客户端；手工 auto 保持原样。
     if action == "silent":
@@ -2703,7 +2765,7 @@ def main(argv=None):
                    "needs_attention": True}
         emit(payload, action)
         return 2
-    if action == "silent":
+    if action == "silent" and not _idle_skipped():
         _reshuffle_schedule()
     return code
 

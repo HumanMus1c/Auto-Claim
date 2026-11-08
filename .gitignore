@@ -40,7 +40,9 @@ register-task.bat
 
 # 本地测试脚本：只保留工作区，不纳入版本控制。
 # 新建测试文件请直接使用 test_*.py / test_*.js 等命名，Git 会自动忽略。
+# 例外：随仓库分发的 Python 回归测试（build_exe.py 会跑它们），单独放行。
 test_*.py
 test_*.js
 *_test.py
 *.test.js
+!dashboard/webview/test_idle_trigger.py

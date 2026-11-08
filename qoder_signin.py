@@ -49,6 +49,24 @@ try:
 except Exception:  # 单独拷走 qoder_signin.py 时仍可运行
     client_launcher = None
 
+try:
+    import idle_trigger
+except Exception:
+    # 计划任务可能直接跑 pythonw qoder_signin.py，此时 dashboard/ 不在 sys.path
+    _dashboard_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "dashboard")
+    if os.path.isdir(_dashboard_dir) and _dashboard_dir not in sys.path:
+        sys.path.insert(0, _dashboard_dir)
+    try:
+        import idle_trigger
+    except Exception:
+        idle_trigger = None
+
+# 空闲补跑：计划任务除了随机时刻还挂着空闲触发器，机器空闲就补一次；
+# 只在 silent（计划任务）动作上去重，手工 auto / status 永远照常执行。
+IDLE_ACTIONS = ("silent",)
+RECORD_ACTIONS = ("auto", "silent")
+
 VERSION = "1.0.0"
 
 # 活动固定按 UTC+8 刷新，与运行机器的本地时区无关。
@@ -1140,7 +1158,58 @@ def _ensure_client_running():
         pass
 
 
+def _idle_skip(action):
+    """空闲触发 + 最近刚跑过 → 直接返回，不解密凭据、不发请求。"""
+    if idle_trigger is None or action not in IDLE_ACTIONS:
+        return False
+    try:
+        if idle_trigger.should_skip("qoder"):
+            idle_trigger.log("Qoder 空闲补跑：刚跑过（冷却中），跳过")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _record_idle(action, code):
+    if idle_trigger is None or action not in RECORD_ACTIONS:
+        return
+    try:
+        idle_trigger.record("qoder", code == 0)
+    except Exception:
+        pass
+
+
+def _idle_skipped():
+    """这次是否因为「刚跑过、还在冷却」被空闲补跑闸门挡下。
+
+    挡住时不能再重排触发时刻：不然每空闲一次就把当天已过的点重抽一遍，
+    任务定义白写一次，日志也会多出一串没意义的「已重排」。
+    """
+    try:
+        return bool(idle_trigger and idle_trigger.skipped("qoder"))
+    except Exception:
+        return False
+
+
 def run(action, dry_run=False, once=False, base_url=None):
+    """公开入口：空闲补跑去重 + 记录结果，实际流程在 _run_action()。"""
+    if _idle_skip(action):
+        return 0
+    try:
+        code = _run_action(action, dry_run=dry_run, once=once,
+                           base_url=base_url)
+    except BaseException:
+        # 异常也算失败，下一次空闲补跑继续尝试
+        _record_idle(action, 1)
+        raise
+    # 试运行没有真的领取，不能记成一次执行，否则会白白占掉冷却窗口
+    if not dry_run:
+        _record_idle(action, code)
+    return code
+
+
+def _run_action(action, dry_run=False, once=False, base_url=None):
     if action not in ("auto", "silent", "status", "doctor"):
         out = _result("ERROR", "未知命令：%s（可用：auto / silent / status / doctor）" % action)
         emit(out, action)
@@ -1219,7 +1288,7 @@ def main(argv=None):
               "report": "脚本运行异常（%s）" % type(exc).__name__,
               "needs_attention": True}, action)
         return 2
-    if action == "silent":
+    if action == "silent" and not _idle_skipped():
         _reshuffle_schedule()
     return code
 

@@ -172,11 +172,18 @@ try {
     foreach ($t in $times) {
         $triggers += New-ScheduledTaskTrigger -Daily -At $t -ErrorAction Stop
     }
+    # 空闲触发器：New-ScheduledTaskTrigger 没有空闲类型，只能直接造 CIM 实例。
+    # 与上面的随机时刻并行——机器睡过整组时刻、或断电重启后，空闲下来就补一次。
+    $triggers += New-CimInstance -CimClass (Get-CimClass `
+        -ClassName MSFT_TaskIdleTrigger `
+        -Namespace Root/Microsoft/Windows/TaskScheduler) -ClientOnly
 
     $action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$signin`" silent" -ErrorAction Stop
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden `
         -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries `
-        -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -ErrorAction Stop
+        -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -IdleDuration (New-TimeSpan -Minutes 4) `
+        -IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd -ErrorAction Stop
 
     Register-ScheduledTask -TaskName $taskName -TaskPath "\" `
         -Action $action -Trigger $triggers -Settings $settings -Principal $principal `

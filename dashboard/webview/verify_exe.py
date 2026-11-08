@@ -32,13 +32,15 @@ FINGERPRINTS = ["_diag_dir", "_safe_worker", "_service_main",
                 # 状态点区分「未安装 / 未登录 / 可用」：桌面端安装与运行探测
                 "_desktop_state", "_install_candidates",
                 # 数据目录改名 + 旧目录迁移，以及固定 WebView2 缓存目录
-                "_migrate_legacy_dir", "webview2"]
+                "_migrate_legacy_dir", "webview2",
+                # 空闲补跑：空闲触发器 + 「刚跑过就跳过」的本地冷却
+                "_record_idle", "_idle_skipped", "idle_trigger"]
 
 # spec 以 datas 形式放在包根的运行期模块；app.py 采用 fail-open import，
 # 模块缺失时程序仍能启动但对应功能会静默消失，所以这里单独核对。
 # schedule_jitter 例外：win_service 是硬依赖它，缺了整个 --service 都起不来。
 REQUIRED_ENTRIES = ["win_theme.py", "win_title.py", "win_guard.py",
-                    "win_service.py", "schedule_jitter.py",
+                    "win_service.py", "schedule_jitter.py", "idle_trigger.py",
                     "win_icon.py", "win_geometry.py"]
 
 

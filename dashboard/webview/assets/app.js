@@ -1766,6 +1766,8 @@ function makeServiceNode(t) {
   const line1 = document.createElement('p');
   line1.className = 'svc-line';
   line1.textContent = (t.when || '—') + ' · ' + (t.what || '');
+  // 排期 + 空闲补跑的说明比卡片宽，悬停给出全文
+  line1.title = line1.textContent;
   el.appendChild(line1);
 
   const line2 = document.createElement('p');
@@ -1778,7 +1780,8 @@ function makeServiceNode(t) {
     // 触发时刻是随机生成的，实际排期放进 title，避免第一行被 6 个时间挤爆
     const jitter = (t.times && t.times.length)
       ? '随机时刻 ' + t.times.join(' / ') : '';
-    line2.title = [t.action, t.last_run, t.next_run, jitter]
+    line2.title = [t.action, t.last_run, t.next_run, jitter,
+      t.idle ? '含空闲时自动补跑（刚跑过会跳过）' : '']
       .filter(Boolean).join('\n');
   } else {
     line2.textContent = '点击「安装 / 修复」创建此任务';
@@ -2057,7 +2060,7 @@ function renderService(s) {
   } else if (SERVICE.installed && SERVICE.enabled) {
     summary.textContent = '两个计划任务均已安装并启用'
       + (SERVICE.next_run ? '，下次运行 ' + SERVICE.next_run : '')
-      + '。';
+      + '；机器空闲时还会自动补跑（刚跑过会跳过）。';
   } else if (SERVICE.installed) {
     const enabledCount = tasks.filter((t) => t.installed && t.enabled).length;
     summary.textContent = enabledCount

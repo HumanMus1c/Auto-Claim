@@ -2475,6 +2475,28 @@ def _reshuffle_schedule(kind):
         _append_log("[jitter] %s 重排异常：%s" % (kind, exc))
 
 
+def _idle_skipped(kind):
+    """这次是否被空闲补跑的冷却闸门挡下。
+
+    挡住时既不算失败、也不该重排：跳过没有产生新结果，重排只会把当天
+    已过的点每空闲一次就重抽一次，白写任务定义。
+    """
+    try:
+        import idle_trigger
+        return idle_trigger.skipped(kind)
+    except Exception:
+        return False
+
+
+def _record_idle(kind, ok):
+    """记下最终结果（含失败重试后的结论），供下一次空闲补跑判断。"""
+    try:
+        import idle_trigger
+        idle_trigger.record(kind, ok, _diag_dir())
+    except Exception:
+        pass
+
+
 def _service_main(argv):
     """计划任务入口：``--service silent`` / ``silent-poll``。
 
@@ -2510,10 +2532,14 @@ def _service_main(argv):
     # silent 正常时 stdout 为空；异常或加载失败才会有内容，落盘便于事后追溯。
     for line in (stderr or "").splitlines() + (stdout or "").splitlines():
         _append_log("[service] " + line)
+    if _idle_skipped("workbuddy"):
+        # 空闲触发撞上「刚跑过、还在冷却」：正常结束，不写失败记录、不重排
+        return 0
     # 以 0 退出但 result 是 AUTH_ERROR 的情况也要走自愈，判断交给这里。
     exit_code = _handle_service_failure(
         "workbuddy", action, code if isinstance(code, int) else 1, stdout,
         time.monotonic() - started)
+    _record_idle("workbuddy", exit_code == 0)
     _reshuffle_schedule("workbuddy")
     return exit_code
 
@@ -2551,8 +2577,13 @@ def _side_service_main(name, loader, argv):
         code = 1
         stdout = json.dumps({"result": "ERROR", "report": detail})
 
+    if _idle_skipped(kind):
+        # 空闲触发撞上「刚跑过、还在冷却」：跳过不是失败，也不能让
+        # _service_failure 去读 10 分钟内的旧日志——那会把上一次的真失败重复报一遍。
+        return 0
     exit_code = _handle_service_failure(kind, action, code, stdout,
                                         time.monotonic() - started)
+    _record_idle(kind, exit_code == 0)
     _reshuffle_schedule(kind)
     return exit_code
 

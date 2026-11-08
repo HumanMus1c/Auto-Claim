@@ -10,11 +10,13 @@
 """
 
 import datetime
+import json
 import os
 import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DASHBOARD = os.path.dirname(HERE)
@@ -233,6 +235,95 @@ class TraeTaskTest(unittest.TestCase):
                 self.assertLessEqual(
                     abs(shifted - base),
                     win_service.schedule_jitter.JITTER_WINDOW // 60)
+
+
+class IdleTriggerTest(unittest.TestCase):
+    """空闲补跑：每个任务的注册脚本都必须带空闲触发器和配套设置。
+
+    这里的断言直接看生成的 PowerShell 文本——真正容易出错的地方不是
+    「会不会写」，而是「重排时会不会把触发器丢了」：重排是从零重建任务，
+    漏一条就等于每跑完一次就把兜底机制删掉，而且不报任何错。
+    """
+
+    def test_install_script_registers_idle_trigger_for_both_tasks(self):
+        script = win_service._install_script("C:/app/app.exe", ["--service"],
+                                             "C:/app")
+        self.assertEqual(script.count("MSFT_TaskIdleTrigger"), len(win_service.TASKS))
+        self.assertEqual(script.count("-DontStopOnIdleEnd"), len(win_service.TASKS))
+        self.assertEqual(script.count("-IdleDuration"), len(win_service.TASKS))
+
+    def test_single_task_script_registers_idle_trigger(self):
+        script = win_service._single_task_script(
+            "C:/Python/pythonw.exe", '"C:/app/qoder_signin.py" silent', "C:/app",
+            win_service.QODER_TASKS[0], ["10:05", "11:07"], "ok")
+        self.assertIn("MSFT_TaskIdleTrigger", script)
+        self.assertIn("-DontStopOnIdleEnd", script)
+        self.assertIn("-IdleWaitTimeout", script)
+
+    def test_reshuffle_keeps_idle_trigger(self):
+        """重排会重建整个任务定义，空闲触发器必须一起写回去。"""
+        script = win_service._rewrite_times_script([{
+            "name": "TraeDailyCheckin", "exe": "C:/app/pythonw.exe",
+            "args": "trae_signin.py silent", "workdir": "C:/app",
+            "minutes": 10, "description": "d", "times": ["08:05", "09:05"],
+        }])
+        self.assertIn("MSFT_TaskIdleTrigger", script)
+        self.assertIn("-DontStopOnIdleEnd", script)
+
+    def test_status_reports_idle_trigger(self):
+        raw = {
+            "ok": True,
+            "tasks": [
+                {"name": "WorkBuddyAutoSignin", "installed": True,
+                 "state": "Ready", "times": ["00:07"], "idle": True},
+                {"name": "WorkBuddyGrowthPoll", "installed": True,
+                 "state": "Ready", "times": ["01:03"], "idle": False},
+            ],
+        }
+        status = win_service._normalize_status(raw)
+        self.assertTrue(status["tasks"][0]["idle"])
+        self.assertFalse(status["tasks"][1]["idle"])
+        self.assertIn("空闲补跑", status["tasks"][0]["when"])
+        self.assertNotIn("空闲补跑", status["tasks"][1]["when"])
+
+    def test_uninstalled_task_reports_no_idle(self):
+        self.assertFalse(win_service._empty_tasks()[0]["idle"])
+
+
+class ReshuffleIdleUpgradeTest(unittest.TestCase):
+    """旧任务没有空闲触发器时，重排要顺手补上（不能只依赖重新安装）。"""
+
+    def test_missing_idle_trigger_forces_rewrite(self):
+        read_payload = json.dumps({"ok": True, "tasks": [{
+            "name": "WorkBuddyAutoSignin",
+            "times": ["00:05"],
+            "idle": False,
+            "exe": "C:/app/app.exe",
+            "args": "--service silent",
+            "workdir": "C:/app",
+        }]})
+        seen = {}
+
+        def fake_run(script, timeout=40):
+            if "Register-ScheduledTask" in script:
+                seen["rewrite"] = script
+                return {"ok": True, "tasks": ["WorkBuddyAutoSignin"]}
+            return json.loads(read_payload)
+
+        with mock.patch.object(win_service, "_run_ps_json", side_effect=fake_run), \
+                mock.patch.object(win_service, "read_jitter_state", return_value={}), \
+                mock.patch.object(win_service, "write_jitter_state"):
+            outcome = win_service.reshuffle(
+                "workbuddy", data_dir="unused", force=True,
+                now=datetime.datetime(2026, 11, 5, 0, 1))
+
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(len(outcome["changed"]), 1)
+        self.assertTrue(outcome["changed"][0]["idle_added"])
+        # 时刻没变，重写的唯一理由就是补空闲触发
+        self.assertEqual(outcome["changed"][0]["old"],
+                         outcome["changed"][0]["new"])
+        self.assertIn("MSFT_TaskIdleTrigger", seen["rewrite"])
 
 
 class ScheduleDensityTest(unittest.TestCase):
