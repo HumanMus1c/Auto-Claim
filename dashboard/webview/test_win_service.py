@@ -266,9 +266,23 @@ class IdleTriggerTest(unittest.TestCase):
             "name": "TraeDailyCheckin", "exe": "C:/app/pythonw.exe",
             "args": "trae_signin.py silent", "workdir": "C:/app",
             "minutes": 10, "description": "d", "times": ["08:05", "09:05"],
+            "once": ["2026-11-08T21:13:00"],
         }])
         self.assertIn("MSFT_TaskIdleTrigger", script)
         self.assertIn("-DontStopOnIdleEnd", script)
+        self.assertIn("New-ScheduledTaskTrigger -Once", script)
+
+    def test_read_script_separates_daily_and_once(self):
+        """一次性点不能混进每日时刻，否则「每天 N 次」会被算成 N+2。"""
+        script = win_service._read_times_script(win_service.TASKS)
+        self.assertIn("MSFT_TaskDailyTrigger", script)
+        self.assertIn("MSFT_TaskTimeTrigger", script)
+        self.assertIn("once = @($once)", script)
+
+    def test_status_script_separates_daily_and_once(self):
+        script = win_service._status_script(win_service.TASKS)
+        self.assertIn("MSFT_TaskDailyTrigger", script)
+        self.assertIn("once = @($once)", script)
 
     def test_status_reports_idle_trigger(self):
         raw = {
@@ -289,6 +303,21 @@ class IdleTriggerTest(unittest.TestCase):
     def test_uninstalled_task_reports_no_idle(self):
         self.assertFalse(win_service._empty_tasks()[0]["idle"])
 
+    def test_status_keeps_only_future_once_points(self):
+        now = datetime.datetime.now()
+        future = (now + datetime.timedelta(minutes=20)).strftime(
+            "%Y-%m-%dT%H:%M:%S")
+        past = (now - datetime.timedelta(minutes=20)).strftime(
+            "%Y-%m-%dT%H:%M:%S")
+        raw = {
+            "ok": True,
+            "tasks": [{"name": "WorkBuddyAutoSignin", "installed": True,
+                       "state": "Ready", "times": ["00:07"],
+                       "once": [past, future], "idle": True}],
+        }
+        status = win_service._normalize_status(raw)
+        self.assertEqual(status["tasks"][0]["once"], [future])
+
 
 class ReshuffleIdleUpgradeTest(unittest.TestCase):
     """旧任务没有空闲触发器时，重排要顺手补上（不能只依赖重新安装）。"""
@@ -297,6 +326,7 @@ class ReshuffleIdleUpgradeTest(unittest.TestCase):
         read_payload = json.dumps({"ok": True, "tasks": [{
             "name": "WorkBuddyAutoSignin",
             "times": ["00:05"],
+            "once": [],
             "idle": False,
             "exe": "C:/app/app.exe",
             "args": "--service silent",
@@ -312,7 +342,12 @@ class ReshuffleIdleUpgradeTest(unittest.TestCase):
 
         with mock.patch.object(win_service, "_run_ps_json", side_effect=fake_run), \
                 mock.patch.object(win_service, "read_jitter_state", return_value={}), \
-                mock.patch.object(win_service, "write_jitter_state"):
+                mock.patch.object(win_service, "write_jitter_state"), \
+                mock.patch.object(win_service.idle_trigger, "idle_at_start",
+                                  return_value=0), \
+                mock.patch.object(win_service.idle_trigger, "was_planned",
+                                  return_value=False):
+            win_service.RESHUFFLED_IN_PROCESS.discard("workbuddy")
             outcome = win_service.reshuffle(
                 "workbuddy", data_dir="unused", force=True,
                 now=datetime.datetime(2026, 11, 5, 0, 1))
@@ -324,6 +359,93 @@ class ReshuffleIdleUpgradeTest(unittest.TestCase):
         self.assertEqual(outcome["changed"][0]["old"],
                          outcome["changed"][0]["new"])
         self.assertIn("MSFT_TaskIdleTrigger", seen["rewrite"])
+
+
+class SleepWindowPlanTest(unittest.TestCase):
+    """睡眠倒计时内的随机点：排点、保留、清理三条路径。"""
+
+    NOW = datetime.datetime(2026, 11, 8, 21, 0)
+
+    def _fake_task(self, once=()):
+        return {"ok": True, "tasks": [{
+            "name": "WorkBuddyAutoSignin",
+            "times": ["00:05"],
+            "once": list(once),
+            "idle": True,
+            "exe": "C:/app/app.exe",
+            "args": "--service silent",
+            "workdir": "C:/app",
+        }]}
+
+    def _run(self, task, idle_start, idle_since, planned=False,
+             plan_window=None, stored_plan=None):
+        seen = {}
+
+        def fake_run(script, timeout=40):
+            if "Register-ScheduledTask" in script:
+                seen["rewrite"] = script
+                return {"ok": True, "tasks": ["WorkBuddyAutoSignin"]}
+            return task
+
+        with mock.patch.object(win_service, "_run_ps_json", side_effect=fake_run), \
+                mock.patch.object(win_service, "read_jitter_state", return_value={}), \
+                mock.patch.object(win_service, "write_jitter_state"), \
+                mock.patch.object(win_service.idle_trigger, "idle_at_start",
+                                  return_value=idle_start), \
+                mock.patch.object(win_service.idle_trigger, "was_planned",
+                                  return_value=planned), \
+                mock.patch.object(win_service.idle_trigger,
+                                  "idle_since_at_start", return_value=idle_since), \
+                mock.patch.object(win_service.idle_trigger, "plan_window",
+                                  return_value=plan_window), \
+                mock.patch.object(win_service.idle_trigger, "read_plan",
+                                  return_value=stored_plan or {}), \
+                mock.patch.object(win_service.idle_trigger, "write_plan") as write_plan, \
+                mock.patch.object(win_service.idle_trigger, "clear_plan") as clear_plan:
+            win_service.RESHUFFLED_IN_PROCESS.discard("workbuddy")
+            outcome = win_service.reshuffle("workbuddy", data_dir="unused",
+                                            now=self.NOW, force=True)
+        return outcome, write_plan, clear_plan, seen
+
+    def test_idle_run_plans_two_points_before_sleep(self):
+        idle_since = (self.NOW - datetime.timedelta(minutes=5)).timestamp()
+        deadline = idle_since + 3600
+        outcome, write_plan, _clear, seen = self._run(
+            self._fake_task(), idle_start=300, idle_since=idle_since,
+            plan_window=(idle_since, deadline))
+
+        once = outcome["changed"][0]["once"]
+        self.assertEqual(len(once), win_service.idle_trigger.PLAN_COUNT)
+        points = [datetime.datetime.strptime(t, "%Y-%m-%dT%H:%M:%S").timestamp()
+                  for t in once]
+        self.assertEqual(points, sorted(points))
+        self.assertLessEqual(points[-1], deadline - win_service.idle_trigger.PLAN_MARGIN)
+        write_plan.assert_called_once()
+        self.assertIn("New-ScheduledTaskTrigger -Once", seen["rewrite"])
+
+    def test_planned_run_keeps_remaining_points(self):
+        future = (self.NOW + datetime.timedelta(minutes=12)).strftime(
+            "%Y-%m-%dT%H:%M:%S")
+        outcome, write_plan, _clear, _seen = self._run(
+            self._fake_task([future]), idle_start=1500,
+            idle_since=(self.NOW - datetime.timedelta(minutes=25)).timestamp(),
+            planned=True,
+            plan_window=(self.NOW.timestamp() - 1500,
+                         self.NOW.timestamp() + 1800))
+
+        self.assertEqual(outcome["changed"][0]["once"], [future])
+        write_plan.assert_not_called()
+
+    def test_active_run_clears_stale_points(self):
+        future = (self.NOW + datetime.timedelta(minutes=12)).strftime(
+            "%Y-%m-%dT%H:%M:%S")
+        outcome, write_plan, clear_plan, _seen = self._run(
+            self._fake_task([future]), idle_start=0,
+            idle_since=0, plan_window=None)
+
+        self.assertEqual(outcome["changed"][0]["once"], [])
+        write_plan.assert_not_called()
+        clear_plan.assert_called_once()
 
 
 class ScheduleDensityTest(unittest.TestCase):

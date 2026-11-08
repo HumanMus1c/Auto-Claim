@@ -1780,8 +1780,10 @@ function makeServiceNode(t) {
     // 触发时刻是随机生成的，实际排期放进 title，避免第一行被 6 个时间挤爆
     const jitter = (t.times && t.times.length)
       ? '随机时刻 ' + t.times.join(' / ') : '';
-    line2.title = [t.action, t.last_run, t.next_run, jitter,
-      t.idle ? '含空闲时自动补跑（刚跑过会跳过）' : '']
+    const once = (t.once && t.once.length)
+      ? '睡眠前补跑 ' + t.once.map((s) => s.slice(11, 16)).join(' / ') : '';
+    line2.title = [t.action, t.last_run, t.next_run, jitter, once,
+      t.idle ? '空闲补跑：当次 + 睡眠倒计时内随机 2 次' : '']
       .filter(Boolean).join('\n');
   } else {
     line2.textContent = '点击「安装 / 修复」创建此任务';
@@ -2060,7 +2062,7 @@ function renderService(s) {
   } else if (SERVICE.installed && SERVICE.enabled) {
     summary.textContent = '两个计划任务均已安装并启用'
       + (SERVICE.next_run ? '，下次运行 ' + SERVICE.next_run : '')
-      + '；机器空闲时还会自动补跑（刚跑过会跳过）。';
+      + '；机器空闲时还会在睡眠倒计时内补跑（当次 + 随机 2 次）。';
   } else if (SERVICE.installed) {
     const enabledCount = tasks.filter((t) => t.installed && t.enabled).length;
     summary.textContent = enabledCount

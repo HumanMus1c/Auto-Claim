@@ -134,6 +134,12 @@ TRAE_TASKS = (
 TRAE_TASK_BY_NAME = {item["name"]: item for item in TRAE_TASKS}
 TRAE_TASK_NAMES = tuple(TRAE_TASK_BY_NAME)
 
+# 睡眠倒计时里的随机点只挂在每个模块的「主任务」上：WorkBuddy 的两个任务
+# 会同时被空闲触发（同一个空闲事件），两个都排点就会变成 6 次；让签到任务
+# 排、轮询任务只保留每日时刻。主任务被停用时最多没有这 2 个补跑点，签到本身
+# 仍由每日时刻兜底。
+IDLE_PLANNERS = ("WorkBuddyAutoSignin", "QoderDailyCredits", "TraeDailyCheckin")
+
 # 主触发点之后的小时偏移。间隔控制在 1~2 小时：睡眠错过一两个点也能在醒来
 # 后一小时内补上，不依赖 StartWhenAvailable 的「只补最近一次」。
 TRAE_OFFSETS = (0, 1, 3, 5, 7, 9, 11, 13)
@@ -435,9 +441,18 @@ try {
         $actions = @($t.Actions | ForEach-Object {
             (($_.Execute) + ' ' + ($_.Arguments)).Trim()
         })
-        # 触发时刻是随机生成的，界面要显示真实排期而不是常量
-        $times = @($t.Triggers | ForEach-Object {
+        # 触发时刻是随机生成的，界面要显示真实排期而不是常量。
+        # 只统计每日触发器：睡眠前随机点是一次性的，混进来会让「每天 N 次」变成 N+2
+        $times = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger'
+        } | ForEach-Object {
             if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
+        } | Sort-Object)
+        # 睡眠倒计时里还没到的一次性点，卡片悬停时显示
+        $once = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' -and $_.StartBoundary
+        } | ForEach-Object {
+            ([datetime]$_.StartBoundary).ToString('yyyy-MM-ddTHH:mm:ss')
         } | Sort-Object)
         # 空闲触发器没有 StartBoundary，靠类型名单独认；旧版任务没有这一条
         $idle = @($t.Triggers | Where-Object {
@@ -453,6 +468,7 @@ try {
             last_result = $result
             action = ($actions -join '; ')
             times = @($times)
+            once = @($once)
             idle = $idle
         }
     }
@@ -472,6 +488,7 @@ def _empty_tasks(specs=TASKS):
             "label": item["label"],
             "when": item["when"],
             "times": [],
+            "once": [],
             "what": item["what"],
             "installed": False,
             "enabled": False,
@@ -497,6 +514,7 @@ def _normalize_status(raw, log_path=None, specs=TASKS):
         raise ServiceError(message, code, detail=detail)
 
     spec_by_name = {item["name"]: item for item in specs}
+    stamp = datetime.datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     tasks = []
     for item in raw.get("tasks") or []:
         if not isinstance(item, dict):
@@ -519,6 +537,8 @@ def _normalize_status(raw, log_path=None, specs=TASKS):
             "when": _when_text(spec, _as_text_list(item.get("times")),
                                idle=bool(item.get("idle"))),
             "times": _as_text_list(item.get("times")),
+            # 睡眠倒计时里还没到的点（ISO 时间），界面悬停时显示
+            "once": [t for t in _as_text_list(item.get("once")) if t > stamp],
             "what": spec.get("what", ""),
             "installed": installed,
             "enabled": enabled,
@@ -1243,8 +1263,18 @@ try {
         if ($null -eq $t) { continue }
         $act = @($t.Actions)[0]
         if ($null -eq $act) { continue }
-        $times = @($t.Triggers | ForEach-Object {
+        # 只认每天的时刻；睡眠前随机点是一次性触发器（TimeTrigger），
+        # 混进来会被当成「第 8、第 9 个每日时刻」重排掉
+        $times = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskDailyTrigger'
+        } | ForEach-Object {
             if ($_.StartBoundary) { ([datetime]$_.StartBoundary).ToString('HH:mm') }
+        } | Sort-Object)
+        # 一次性触发器的绝对时间，重排时原样保留（已经过去的由调用方剔除）
+        $once = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskTimeTrigger' -and $_.StartBoundary
+        } | ForEach-Object {
+            ([datetime]$_.StartBoundary).ToString('yyyy-MM-ddTHH:mm:ss')
         } | Sort-Object)
         # 空闲触发器没有 StartBoundary，靠类型名单独认。旧版任务没有这一条，
         # 重排时顺手补上——这就是「装过旧版的人不用重新安装也能升级」的路径。
@@ -1254,6 +1284,7 @@ try {
         $out += [pscustomobject]@{
             name = $n
             times = @($times)
+            once = @($once)
             idle = $idle
             exe = [string]$act.Execute
             args = [string]$act.Arguments
@@ -1296,6 +1327,10 @@ try {
         $triggers = @()
         foreach ($t in @($item.times)) {
             $triggers += New-ScheduledTaskTrigger -Daily -At $t
+        }
+        # 睡眠倒计时里的随机点：一次性触发器，跑完不再出现
+        foreach ($t in @($item.once)) {
+            $triggers += New-ScheduledTaskTrigger -Once -At ([datetime]$t)
         }
         $triggers += %s
         if ($item.workdir) {
@@ -1346,6 +1381,49 @@ def _reshuffle_error(message):
     return {"ok": False, "error": message, "changed": []}
 
 
+def _once_times_for(kind, name, item, now):
+    """决定这次重排给任务保留 / 新排哪些「睡眠前随机点」。
+
+    返回 ``(once, payload)``：
+
+      once    —— 本次要写进任务的一次性触发器（ISO 时间，升序）
+      payload —— 新排的点 ``(points, idle_since, deadline)``；只有真正新排
+                 成功后才写进状态文件，写失败就当没排过
+
+    规则：
+      - 只有主任务排点（WorkBuddy 两个任务会同时被空闲触发，都排就翻倍）
+      - 本进程自己就是计划点 → 保留还没到的那几个，绝不追加
+      - 刚进入空闲且本窗口没排过 → 按电源方案的睡眠截止随机排
+      - 其余情况（用户在场、空闲太久、没有倒计时）→ 清掉旧点
+    """
+    stamp = now.strftime("%Y-%m-%dT%H:%M:%S")
+    old = [t for t in _as_text_list(item.get("once")) if t > stamp]
+    if name not in IDLE_PLANNERS:
+        return [], None
+    if idle_trigger.was_planned(kind):
+        return old, None
+    idle = idle_trigger.idle_at_start(kind)
+    if idle < idle_trigger.DETECT_SECONDS or idle >= idle_trigger.PLAN_MAX_IDLE:
+        return [], None
+    idle_since = idle_trigger.idle_since_at_start(kind)
+    if not idle_since:
+        return [], None
+    window = idle_trigger.plan_window(idle_since)
+    if not window:
+        return [], None
+    idle_since, deadline = window
+    plan = idle_trigger.read_plan(kind)
+    if plan and abs(float(plan.get("idle_since") or 0) - idle_since) <= 90:
+        # 同一轮空闲已经排过：只保留剩余点，不再追加
+        return old, None
+    points = idle_trigger.pick_points(deadline, now.timestamp())
+    if not points:
+        return [], None
+    once = [datetime.datetime.fromtimestamp(p).strftime("%Y-%m-%dT%H:%M:%S")
+            for p in points]
+    return once, (points, idle_since, deadline)
+
+
 def reshuffle(kind, data_dir=None, now=None, force=False):
     """签到跑完后重排触发时刻；返回可直接写进日志的小结。
 
@@ -1355,6 +1433,11 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
 
     顺带承担「旧任务升级」：读出任务时如果发现没有空闲触发器，即使时刻
     没变也会重写一次把它补上——装过旧版的机器不用重新点「安装 / 修复」。
+
+    另外负责「睡眠前随机点」：这次运行如果由空闲触发，就读当前电源方案的
+    睡眠/休眠倒计时，在窗口内随机排 2 个一次性触发器（加上当次共 3 次），
+    并保证最后一个点离睡眠还有 8 分钟以上。计划点自身跑完只保留剩余的，
+    不追加；用户回来后剩下的点会被闸门跳过。
     """
     if not supported():
         return _reshuffle_error("计划任务管理仅支持 Windows")
@@ -1387,9 +1470,12 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
             new = schedule_jitter.reshuffle(
                 old, spec["name"], base=base, now=now,
                 forward=bool(spec.get("forward")))
+            once, plan_payload = _once_times_for(kind, spec["name"], item, now)
+            once_old = [t for t in _as_text_list(item.get("once"))
+                        if t > now.strftime("%Y-%m-%dT%H:%M:%S")]
             # 旧版任务没有空闲触发器：即使时刻没变也要重写一次，把它补上
             idle_added = not bool(item.get("idle"))
-            if new == old and not idle_added:
+            if new == old and once == once_old and not idle_added:
                 continue
             changes.append({
                 "name": spec["name"],
@@ -1401,11 +1487,21 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
                 "minutes": int(spec.get("minutes") or 10),
                 "description": spec.get("description") or "",
                 "times": new,
+                "once": once,
             })
             summary.append({"name": spec["name"], "old": old, "new": new,
-                            "idle_added": idle_added})
+                            "idle_added": idle_added, "once": once,
+                            "planner": spec["name"] in IDLE_PLANNERS,
+                            "plan": plan_payload})
         if changes:
             _run_ps_json(_rewrite_times_script(changes), timeout=60)
+            # 只有任务真的写成功了才记计划；否则状态里会留下永远不会发生的点
+            for item in summary:
+                if item.get("plan"):
+                    idle_trigger.write_plan(kind, *item["plan"],
+                                            data_dir=data_dir)
+                elif item.get("planner") and not item.get("once"):
+                    idle_trigger.clear_plan(kind, data_dir)
     except Exception as exc:
         return {"ok": False, "changed": [], "error": "%s" % exc}
 
@@ -1430,11 +1526,17 @@ def apply_jitter_after_run(kind, data_dir=None):
     if outcome.get("changed"):
         parts = []
         for item in outcome["changed"]:
-            if item["old"] == item["new"]:
-                parts.append("%s 已补上空闲触发器" % item["name"])
-            else:
-                parts.append("%s %s→%s" % (item["name"], "/".join(item["old"]),
-                                           "/".join(item["new"])))
+            bits = []
+            if item["old"] != item["new"]:
+                bits.append("%s→%s" % ("/".join(item["old"]),
+                                       "/".join(item["new"])))
+            once = item.get("once") or []
+            if once:
+                bits.append("睡眠前补跑 %s"
+                            % " / ".join(t[11:16] for t in once))
+            if not bits:
+                bits.append("已补上空闲触发器")
+            parts.append("%s %s" % (item["name"], "；".join(bits)))
         _append_console_log(
             "[jitter] %s 触发时刻已重排：%s" % (kind, "; ".join(parts)),
             data_dir)
