@@ -1664,6 +1664,92 @@ def _prepare_api(store, account, need_status=True):
     return api, status
 
 
+# 自愈冷却：同一份过期 Token 每 5 分钟只去客户端找一次。一次扫描要把客户端的
+# storage.json 和 leveldb 都读一遍，连续失败时重复扫只是白花时间。
+_REIMPORT_COOLDOWN = 300
+_REIMPORT_TRIED = {}
+
+
+def _client_fresh_credential(account):
+    """从本机客户端找一份比手里更新、且未过期的登录态。
+
+    Trae 桌面端自己会给 Token 续期并写回它的 storage.json，我们从它导入的只是
+    一次性快照：快照过期后，服务端只会回 1001，而我们又没有会话 Cookie 可以
+    续期。所以这里按 account_uid 对齐客户端，只认「同一个账号 + 未过期 + 比当前
+    更晚到期」的候选，把客户端那份新的接过来。
+
+    纯本地只读，不联网；拿不到就返回 None，由调用方按原来的错误上报。
+    """
+    uid = account.get("account_uid")
+    if not uid:
+        return None
+    current = account.get("token") or ""
+    current_expiry = jwt_expiry(current)
+    now = datetime.now(timezone.utc)
+    best, best_expiry = None, None
+    for client in find_client_dirs():
+        item = _scan_client_dir(client)
+        if not item.get("ok"):
+            continue
+        token = item.get("token") or ""
+        # 同一个 Token 没有接的必要，白扫一遍反而会覆盖掉 session 等字段
+        if not token or token == current:
+            continue
+        if jwt_uid(token) != uid:
+            continue
+        expiry = jwt_expiry(token)
+        if expiry is None or expiry <= now:
+            continue
+        # 客户端那份也要比手里的晚到期，否则接过来还是同样的失败
+        if current_expiry is not None and expiry <= current_expiry:
+            continue
+        if best_expiry is None or expiry > best_expiry:
+            best, best_expiry = item, expiry
+    return best
+
+
+def _adopt_client_credential(store, account):
+    """把客户端里更新的登录态接到本地账号上；接到并落盘返回 True。
+
+    只在鉴权失败后调用：这是「补救」而不是常规刷新。任何异常都当成没接到，
+    不能让「客户端没开 / 没登录」变成一个新的报错，盖住原本的 1001。
+    """
+    key = (account["id"], account.get("token") or "")
+    now = time.monotonic()
+    tried = _REIMPORT_TRIED.get(key)
+    if tried is not None and now - tried < _REIMPORT_COOLDOWN:
+        return False
+    # 键里带着 Token，接成功一次就会多一条；顺手清掉过期的，别让这张表只增不减
+    for old in [k for k, when in _REIMPORT_TRIED.items()
+                if now - when >= _REIMPORT_COOLDOWN]:
+        _REIMPORT_TRIED.pop(old, None)
+    _REIMPORT_TRIED[key] = now
+
+    try:
+        item = _client_fresh_credential(account)
+    except Exception:
+        return False
+    if not item:
+        return False
+
+    _store_token(account, item["token"], item.get("session"))
+    if item.get("source"):
+        account["source"] = item["source"]
+    # 客户端换过设备标识时同步过去；被别的账号占着就保留原值，避免两个账号
+    # 抢同一个设备号。
+    device = item.get("device_id")
+    if (_valid_device_id(device)
+            and not _device_in_use(store["accounts"], device, account["id"])):
+        account["device_id"] = device
+    save_store(store)
+    return True
+
+
+def _renewed_note(renewed):
+    """成功时补一句「登录态刚被自动救回来」，方便在日志/告警里回溯。"""
+    return "；登录态已自动从本机客户端更新" if renewed else ""
+
+
 def _remember_status(account, payload):
     if not isinstance(payload, dict):
         return
@@ -2102,6 +2188,12 @@ def refresh_account(account_id=None):
                 time.sleep(0.4)
             try:
                 api, status = _prepare_api(store, account)
+                renewed = False
+                if (not _status_ok(status)
+                        and _adopt_client_credential(store, account)):
+                    # 本地 Token 过期时先接桌面端那份新的，别一上来就报「重新登录」
+                    api, status = _prepare_api(store, account)
+                    renewed = True
                 if not _status_ok(status):
                     message = _status_error(status, api)
                     _remember_status(account, status)
@@ -2114,6 +2206,7 @@ def refresh_account(account_id=None):
                         "checked_in": False,
                         "credits": 0,
                         "remaining": None,
+                        "renewed": renewed,
                     })
                     continue
                 _remember_status(account, status)
@@ -2136,10 +2229,12 @@ def refresh_account(account_id=None):
                     "name": _display_name(account),
                     "ok": True,
                     "result": "ALREADY" if checked_in else "OK",
-                    "message": _text(status.get("message")) or "已连接",
+                    "message": (_text(status.get("message")) or "已连接")
+                               + _renewed_note(renewed),
                     "checked_in": checked_in,
                     "credits": gained,
                     "remaining": remaining if remaining >= 0 else None,
+                    "renewed": renewed,
                 })
                 ok_count += 1
             except Exception as exc:
@@ -2188,6 +2283,11 @@ def _checkin_one(store, account, index, count, quiet=False):
                 "result": "ALREADY", "gained": 0, "message": "本地记录今日已签到"}
 
     api, status = _prepare_api(store, account)
+    renewed = False
+    if not _status_ok(status) and _adopt_client_credential(store, account):
+        # 本地快照过期、又没有会话可续期：先试桌面端那一份新 Token，再判失败
+        api, status = _prepare_api(store, account)
+        renewed = True
     if not _status_ok(status):
         _remember_status(account, status)
         message = _status_error(status, api)
@@ -2196,7 +2296,8 @@ def _checkin_one(store, account, index, count, quiet=False):
             # 不要让人误以为是网络抖动。
             message += "；没有会话 Cookie 可续期，请重新导入本机登录态"
         return {"id": account["id"], "name": name, "ok": False,
-                "result": "AUTH_ERROR", "gained": 0, "message": message}
+                "result": "AUTH_ERROR", "gained": 0, "message": message,
+                "renewed": renewed}
 
     _remember_status(account, status)
     if _status_checked(status):
@@ -2211,7 +2312,8 @@ def _checkin_one(store, account, index, count, quiet=False):
         return {"id": account["id"], "name": name, "ok": True,
                 "result": "ALREADY", "gained": gained,
                 "remaining": remaining if remaining >= 0 else None,
-                "message": "服务器显示今日已签到"}
+                "message": "服务器显示今日已签到" + _renewed_note(renewed),
+                "renewed": renewed}
 
     claim = api.claim()
     if not _status_ok(claim):
@@ -2232,7 +2334,8 @@ def _checkin_one(store, account, index, count, quiet=False):
     return {"id": account["id"], "name": name, "ok": True,
             "result": "CLAIMED", "gained": gained,
             "remaining": remaining if remaining >= 0 else None,
-            "message": "签到成功"}
+            "message": "签到成功" + _renewed_note(renewed),
+            "renewed": renewed}
 
 
 def run_auto(account_id=None):
