@@ -46,3 +46,4 @@ test_*.js
 *_test.py
 *.test.js
 !dashboard/webview/test_idle_trigger.py
+!dashboard/webview/test_trae_backend.py
