@@ -89,13 +89,23 @@ def pre_checks():
     if run("CSS 选择器检查", [PY, os.path.join(HERE, "check_css.py")]) != 0:
         failed.append("style.css 缺关键选择器")
 
-    if run("单元测试", [PY, "-X", "utf8", "-m", "unittest",
-                        "test_locate_signin", "test_win_guard",
-                        "test_win_service", "test_win_icon",
-                        "test_win_geometry", "test_trae_backend",
-                        "test_data_dir", "test_service_recovery",
-                        "test_schedule_jitter", "test_idle_trigger"]) != 0:
-        failed.append("单元测试未通过")
+    # 本地测试脚本不纳入版本控制（.gitignore 的 test_*.py）：缺哪个就跳过哪个，
+    # 和 optional_js_test() 是同一策略。干净克隆里这些文件本来就没有，不能让
+    # 「本地测试不存在」把打包整条链路搞挂。
+    modules = ["test_locate_signin", "test_win_guard", "test_win_service",
+               "test_win_icon", "test_win_geometry", "test_trae_backend",
+               "test_data_dir", "test_service_recovery",
+               "test_schedule_jitter", "test_idle_trigger"]
+    missing = [name for name in modules
+               if not os.path.isfile(os.path.join(HERE, name + ".py"))]
+    present = [name for name in modules if name not in missing]
+    if present:
+        label = ("单元测试" if not missing
+                 else "单元测试（跳过缺失：%s）" % "、".join(missing))
+        if run(label, [PY, "-X", "utf8", "-m", "unittest"] + present) != 0:
+            failed.append("单元测试未通过")
+    else:
+        print("\n--- 单元测试 ---\n（本地测试脚本全部不存在，跳过）", flush=True)
 
     return failed
 
