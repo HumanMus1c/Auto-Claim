@@ -124,10 +124,22 @@ class SkipTest(unittest.TestCase):
             return idle_trigger.should_skip("workbuddy", self.tmp,
                                             now=now or self.now)
 
-    def test_active_user_never_skips(self):
-        idle_trigger.record("workbuddy", True, self.tmp, now=self.now)
+    def test_active_user_without_history_runs(self):
+        """登录 / 解锁兜底：没有成功记录时照常执行。"""
         self.assertFalse(self._skip(10))
         self.assertFalse(idle_trigger.skipped("workbuddy"))
+
+    def test_unlock_right_after_a_run_skips(self):
+        """解锁很频繁：30 分钟内成功过就不能每次解锁都重跑。"""
+        idle_trigger.record("workbuddy", True, self.tmp, now=self.now)
+        self.assertTrue(self._skip(10))
+        self.assertTrue(idle_trigger.skipped("workbuddy"))
+
+    def test_unlock_after_cooldown_runs(self):
+        earlier = self.now - datetime.timedelta(
+            seconds=idle_trigger.COOLDOWN_SECONDS + 30)
+        idle_trigger.record("workbuddy", True, self.tmp, now=earlier)
+        self.assertFalse(self._skip(10))
 
     def test_idle_without_history_runs(self):
         self.assertFalse(self._skip(600))

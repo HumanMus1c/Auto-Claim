@@ -79,6 +79,7 @@ TASKS = (
         "when": "每天 7 次",
         "base_times": SIGNIN_TIMES,
         "forward": True,
+        "fallback": True,
         "what": "签到 + 成长中心",
         "action": "silent",
         "minutes": 10,
@@ -105,6 +106,7 @@ QODER_TASKS = (
         "label": "每日 Credits",
         "when": "每天 8 次",
         "forward": True,
+        "fallback": True,
         "what": "查询并领取 Qoder CN 每日 100 Credits",
         "action": "silent",
         "minutes": 5,
@@ -125,6 +127,7 @@ TRAE_TASKS = (
         "label": "每日签到",
         "when": "每天 8 次",
         "forward": True,
+        "fallback": True,
         "what": "多账号签到 + 剩余积分",
         "action": "silent",
         "minutes": 10,
@@ -158,6 +161,22 @@ IDLE_TRIGGER_PS = (
     "New-CimInstance -CimClass (Get-CimClass -ClassName "
     "MSFT_TaskIdleTrigger -Namespace Root/Microsoft/Windows/TaskScheduler) "
     "-ClientOnly")
+
+# 登录 / 解锁兜底：Windows 的空闲触发器要连续 4 分钟没有键鼠输入才会点火，
+# 息屏锁屏（Kernel-Power 566 type-1）完全不会产生空闲事件。登录后延迟 2 分钟
+# 和每次解锁各补跑一次，覆盖「带着电脑离开 → 回来解锁」这条最容易漏签的路径。
+# 只挂在主签到任务上（见 spec 的 fallback 标记），避免 WorkBuddy 两个任务
+# 同时补跑；是否真的签到仍由 idle_trigger 的 30 分钟冷却决定。
+FALLBACK_TRIGGER_PS = (
+    "$logon = New-ScheduledTaskTrigger -AtLogOn -User $user",
+    "$logon.Delay = 'PT2M'",
+    "$triggers += $logon",
+    "$unlock = New-CimInstance -CimClass (Get-CimClass -ClassName "
+    "MSFT_TaskSessionStateChangeTrigger -Namespace "
+    "Root/Microsoft/Windows/TaskScheduler) -ClientOnly "
+    "-Property @{Enabled=$true; StateChange=[uint32]8; UserId=$user}",
+    "$triggers += $unlock",
+)
 
 # 空闲设置：
 #   IdleDuration  —— Windows 8 以后已弃用（实际由系统按「4 分钟无输入 +
@@ -653,6 +672,9 @@ def _install_script(runner, prefix_args, workdir):
             "    }",
             # 空闲触发与随机时刻并行：睡过整组时刻时由它兜底
             "    $triggers += %s" % IDLE_TRIGGER_PS,
+            # 登录 / 解锁兜底只加在主签到任务上，避免两个 WorkBuddy 任务重复跑
+            *(["    " + line for line in FALLBACK_TRIGGER_PS]
+              if spec.get("fallback") else []),
             "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
             "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
             "-Description %s -Force | Out-Null"
@@ -674,7 +696,7 @@ def _install_script(runner, prefix_args, workdir):
         "    }",
         "    [pscustomobject]@{",
         "        ok = $true",
-        "        message = '已安装并启用 2 个计划任务（WorkBuddyAutoSignin / WorkBuddyGrowthPoll），触发时刻已随机化并启用空闲补跑'",
+        "        message = '已安装并启用 2 个计划任务（WorkBuddyAutoSignin / WorkBuddyGrowthPoll），触发时刻已随机化并启用空闲补跑；签到任务另带登录/解锁兜底'",
         "        tasks = $verified",
         "    } | ConvertTo-Json -Depth 5 -Compress",
         "} catch {",
@@ -1049,6 +1071,8 @@ def _single_task_script(exe, args, workdir, spec, times, message):
         "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
         "    }",
         "    $triggers += %s" % IDLE_TRIGGER_PS,
+        *(["    " + line for line in FALLBACK_TRIGGER_PS]
+          if spec.get("fallback") else []),
         "    Register-ScheduledTask -TaskName %s -TaskPath '\\' "
         "-Action $a -Trigger $triggers -Settings $s -Principal $principal "
         "-Description %s -Force | Out-Null"
@@ -1094,8 +1118,9 @@ def _install_single_task(signin_name, signin_path, spec, times,
                                       runner_args=runner_args)
     times = list(times)
     runtime = RUNTIME_LABEL.get(source, source)
-    message = "%s 已安装并启用（每天 %s + 空闲补跑，使用%s）" % (
-        spec["name"], " / ".join(times), runtime)
+    fallback = " + 登录/解锁兜底" if spec.get("fallback") else ""
+    message = "%s 已安装并启用（每天 %s + 空闲补跑%s，使用%s）" % (
+        spec["name"], " / ".join(times), fallback, runtime)
 
     raw = _parse_json(_run_ps(
         _single_task_script(exe, args, workdir, spec, times, message),
@@ -1281,11 +1306,19 @@ try {
         $idle = @($t.Triggers | Where-Object {
             $_.CimClass.CimClassName -eq 'MSFT_TaskIdleTrigger'
         }).Count -gt 0
+        # 登录 / 解锁兜底：旧版任务没有这两条，重排时按 spec 的 fallback 标记
+        # 补上。已经有的任务在重写时必须原样保留，否则每跑一次就丢一次。
+        $fallback = @($t.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -or
+            ($_.CimClass.CimClassName -eq 'MSFT_TaskSessionStateChangeTrigger' -and
+             [uint32]$_.StateChange -eq 8)
+        }).Count -gt 0
         $out += [pscustomobject]@{
             name = $n
             times = @($times)
             once = @($once)
             idle = $idle
+            fallback = $fallback
             exe = [string]$act.Execute
             args = [string]$act.Arguments
             workdir = [string]$act.WorkingDirectory
@@ -1307,11 +1340,14 @@ def _rewrite_times_script(changes):
     层层转义；报错几乎都出在这一步。
 
     **重排必须把空闲触发器一起写回去**：这里是从零重建任务定义，漏掉它
-    就等于每跑完一次就把兜底机制删掉。顺带也是旧任务的升级路径——早期
-    安装的任务只有 Daily 触发器，下一次重排会自动补上空闲触发。
+    就等于每跑完一次就把兜底机制删掉。登录 / 解锁触发器同理，由 payload
+    里的 ``fallback`` 标记决定是否写入。顺带也是旧任务的升级路径——早期
+    安装的任务只有 Daily 触发器，下一次重排会自动补上空闲和登录/解锁触发。
     """
     payload = json.dumps(changes, ensure_ascii=False)
     encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+    fallback_ps = "\n".join("        " + line
+                            for line in FALLBACK_TRIGGER_PS)
     return _PREAMBLE + r"""
 try {
     $user = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -1333,6 +1369,9 @@ try {
             $triggers += New-ScheduledTaskTrigger -Once -At ([datetime]$t)
         }
         $triggers += %s
+        if ($item.fallback) {
+%s
+        }
         if ($item.workdir) {
             $a = New-ScheduledTaskAction -Execute $item.exe -Argument $item.args -WorkingDirectory $item.workdir
         } else {
@@ -1348,7 +1387,7 @@ try {
     [pscustomobject]@{ ok = $false; error = $_.Exception.Message } |
         ConvertTo-Json -Compress
 }
-""" % (encoded, IDLE_TRIGGER_PS, IDLE_SETTINGS_PS)
+""" % (encoded, IDLE_TRIGGER_PS, fallback_ps, IDLE_SETTINGS_PS)
 
 
 def _norm_path(value):
@@ -1424,6 +1463,22 @@ def _once_times_for(kind, name, item, now):
     return once, (points, idle_since, deadline)
 
 
+def _base_times_for(kind, spec):
+    """旧状态文件缺少 base 时，用当前配置重新推导一套基准点。
+
+    早期版本的 ``schedule-jitter.json`` 没有 ``base``，重排会拿任务里的
+    当前时刻当锚点，每天再抽一次 ±15 分钟，误差逐日累积。WorkBuddy 的
+    基准点写在 spec 里；Qoder / Trae 的基准点可以由配置重新换算出来。
+    """
+    if spec.get("base_times"):
+        return list(spec["base_times"])
+    if kind == "qoder":
+        return qoder_trigger_times(jitter=False)
+    if kind == "trae":
+        return trae_trigger_times(jitter=False)
+    return None
+
+
 def reshuffle(kind, data_dir=None, now=None, force=False):
     """签到跑完后重排触发时刻；返回可直接写进日志的小结。
 
@@ -1466,16 +1521,24 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
             if not old:
                 # 读不到 StartBoundary（任务被手工改成登录触发之类），不去动它
                 continue
-            base = bases.get(spec["name"]) or spec.get("base_times")
+            base = bases.get(spec["name"])
+            if not base:
+                base = _base_times_for(kind, spec)
+                if base:
+                    # 把推导出来的基准点写回状态，下一次重排直接复用
+                    bases[spec["name"]] = list(base)
             new = schedule_jitter.reshuffle(
                 old, spec["name"], base=base, now=now,
                 forward=bool(spec.get("forward")))
             once, plan_payload = _once_times_for(kind, spec["name"], item, now)
             once_old = [t for t in _as_text_list(item.get("once"))
                         if t > now.strftime("%Y-%m-%dT%H:%M:%S")]
-            # 旧版任务没有空闲触发器：即使时刻没变也要重写一次，把它补上
+            # 旧版任务没有空闲 / 登录 / 解锁触发器：即使时刻没变也要重写一次
             idle_added = not bool(item.get("idle"))
-            if new == old and once == once_old and not idle_added:
+            fallback_added = bool(spec.get("fallback")) and not bool(
+                item.get("fallback"))
+            if (new == old and once == once_old
+                    and not idle_added and not fallback_added):
                 continue
             changes.append({
                 "name": spec["name"],
@@ -1488,9 +1551,11 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
                 "description": spec.get("description") or "",
                 "times": new,
                 "once": once,
+                "fallback": bool(spec.get("fallback")),
             })
             summary.append({"name": spec["name"], "old": old, "new": new,
-                            "idle_added": idle_added, "once": once,
+                            "idle_added": idle_added,
+                            "fallback_added": fallback_added, "once": once,
                             "planner": spec["name"] in IDLE_PLANNERS,
                             "plan": plan_payload})
         if changes:
@@ -1507,6 +1572,8 @@ def reshuffle(kind, data_dir=None, now=None, force=False):
 
     # 无论有没有改动都记一次时间戳：没改说明这轮无需重排，同一进程内不必再读
     entry["at"] = time.time()
+    if bases:
+        entry["base"] = bases
     state[kind] = entry
     write_jitter_state(data_dir, state)
     RESHUFFLED_IN_PROCESS.add(kind)
@@ -1534,8 +1601,12 @@ def apply_jitter_after_run(kind, data_dir=None):
             if once:
                 bits.append("睡眠前补跑 %s"
                             % " / ".join(t[11:16] for t in once))
-            if not bits:
+            if item.get("idle_added"):
                 bits.append("已补上空闲触发器")
+            if item.get("fallback_added"):
+                bits.append("已补上登录/解锁触发器")
+            if not bits:
+                bits.append("已重写任务")
             parts.append("%s %s" % (item["name"], "；".join(bits)))
         _append_console_log(
             "[jitter] %s 触发时刻已重排：%s" % (kind, "; ".join(parts)),

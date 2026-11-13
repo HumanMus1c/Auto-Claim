@@ -361,6 +361,141 @@ class ReshuffleIdleUpgradeTest(unittest.TestCase):
         self.assertIn("MSFT_TaskIdleTrigger", seen["rewrite"])
 
 
+class FallbackTriggerTest(unittest.TestCase):
+    """登录 / 解锁兜底：只挂主签到任务，重排时必须原样保留。"""
+
+    def test_only_main_tasks_are_marked_fallback(self):
+        flags = {spec["name"]: bool(spec.get("fallback"))
+                 for spec in (win_service.TASKS + win_service.QODER_TASKS
+                              + win_service.TRAE_TASKS)}
+        self.assertTrue(flags["WorkBuddyAutoSignin"])
+        self.assertTrue(flags["QoderDailyCredits"])
+        self.assertTrue(flags["TraeDailyCheckin"])
+        # 两个 WorkBuddy 任务同时被触发会重复跑
+        self.assertFalse(flags["WorkBuddyGrowthPoll"])
+
+    def test_install_script_adds_fallback_only_to_signin_task(self):
+        script = win_service._install_script("C:/app/app.exe", ["--service"],
+                                             "C:/app")
+        self.assertEqual(script.count("-AtLogOn"), 1)
+        self.assertEqual(script.count("StateChange=[uint32]8"), 1)
+
+    def test_single_task_script_adds_fallback(self):
+        script = win_service._single_task_script(
+            "C:/Python/pythonw.exe", '"C:/app/qoder_signin.py" silent', "C:/app",
+            win_service.QODER_TASKS[0], ["10:05", "11:07"], "ok")
+        self.assertIn("-AtLogOn", script)
+        self.assertIn("StateChange=[uint32]8", script)
+        self.assertIn("PT2M", script)
+
+    def test_rewrite_keeps_fallback(self):
+        script = win_service._rewrite_times_script([{
+            "name": "TraeDailyCheckin", "exe": "C:/app/pythonw.exe",
+            "args": "trae_signin.py silent", "workdir": "C:/app",
+            "minutes": 10, "description": "d", "times": ["08:05", "09:05"],
+            "once": [], "fallback": True,
+        }])
+        self.assertIn("if ($item.fallback)", script)
+        self.assertIn("-AtLogOn", script)
+        self.assertIn("StateChange=[uint32]8", script)
+
+    def test_read_script_reports_fallback(self):
+        script = win_service._read_times_script(win_service.TASKS)
+        self.assertIn("$fallback =", script)
+        self.assertIn("fallback = $fallback", script)
+
+    def test_missing_fallback_forces_rewrite(self):
+        read_payload = json.dumps({"ok": True, "tasks": [{
+            "name": "WorkBuddyAutoSignin",
+            "times": ["00:05"],
+            "once": [],
+            "idle": True,
+            "fallback": False,
+            "exe": "C:/app/app.exe",
+            "args": "--service silent",
+            "workdir": "C:/app",
+        }]})
+        seen = {}
+
+        def fake_run(script, timeout=40):
+            if "Register-ScheduledTask" in script:
+                seen["rewrite"] = script
+                return {"ok": True, "tasks": ["WorkBuddyAutoSignin"]}
+            return json.loads(read_payload)
+
+        with mock.patch.object(win_service, "_run_ps_json", side_effect=fake_run), \
+                mock.patch.object(win_service, "read_jitter_state", return_value={}), \
+                mock.patch.object(win_service, "write_jitter_state"), \
+                mock.patch.object(win_service.idle_trigger, "idle_at_start",
+                                  return_value=0), \
+                mock.patch.object(win_service.idle_trigger, "was_planned",
+                                  return_value=False):
+            win_service.RESHUFFLED_IN_PROCESS.discard("workbuddy")
+            outcome = win_service.reshuffle(
+                "workbuddy", data_dir="unused", force=True,
+                now=datetime.datetime(2026, 11, 5, 0, 3))
+
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(len(outcome["changed"]), 1)
+        self.assertTrue(outcome["changed"][0]["fallback_added"])
+        self.assertFalse(outcome["changed"][0]["idle_added"])
+        self.assertEqual(outcome["changed"][0]["old"],
+                         outcome["changed"][0]["new"])
+        self.assertIn("-AtLogOn", seen["rewrite"])
+
+
+class BaseBackfillTest(unittest.TestCase):
+    """旧状态没有 base 时，重排不能拿漂过的当前值当锚点。"""
+
+    def test_base_follows_configured_schedule(self):
+        self.assertEqual(
+            win_service._base_times_for("qoder", win_service.QODER_TASKS[0]),
+            win_service.qoder_trigger_times(jitter=False))
+        self.assertEqual(
+            win_service._base_times_for("trae", win_service.TRAE_TASKS[0]),
+            win_service.trae_trigger_times(jitter=False))
+        self.assertEqual(
+            win_service._base_times_for("workbuddy", win_service.TASKS[0]),
+            list(win_service.SIGNIN_TIMES))
+
+    def test_reshuffle_persists_backfilled_base(self):
+        read_payload = json.dumps({"ok": True, "tasks": [{
+            "name": "QoderDailyCredits",
+            "times": ["03:57", "04:32", "05:11", "05:57", "06:30",
+                      "19:46", "20:40", "21:12"],
+            "once": [],
+            "idle": True,
+            "fallback": True,
+            "exe": "C:/Python/pythonw.exe",
+            "args": "qoder_signin.py silent",
+            "workdir": "C:/app",
+        }]})
+        seen = {}
+
+        def fake_run(script, timeout=40):
+            if "Register-ScheduledTask" in script:
+                return {"ok": True, "tasks": ["QoderDailyCredits"]}
+            return json.loads(read_payload)
+
+        with mock.patch.object(win_service, "_run_ps_json", side_effect=fake_run), \
+                mock.patch.object(win_service, "read_jitter_state",
+                                  return_value={"qoder": {"at": 1}}), \
+                mock.patch.object(win_service, "write_jitter_state",
+                                  side_effect=lambda data_dir, state: seen.update(state)), \
+                mock.patch.object(win_service.idle_trigger, "idle_at_start",
+                                  return_value=0), \
+                mock.patch.object(win_service.idle_trigger, "was_planned",
+                                  return_value=False):
+            win_service.RESHUFFLED_IN_PROCESS.discard("qoder")
+            outcome = win_service.reshuffle(
+                "qoder", data_dir="unused", force=True,
+                now=datetime.datetime(2026, 11, 13, 13, 0))
+
+        self.assertTrue(outcome["ok"])
+        self.assertEqual(seen["qoder"]["base"]["QoderDailyCredits"],
+                         win_service.qoder_trigger_times(jitter=False))
+
+
 class SleepWindowPlanTest(unittest.TestCase):
     """睡眠倒计时内的随机点：排点、保留、清理三条路径。"""
 
