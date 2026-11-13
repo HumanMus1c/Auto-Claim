@@ -234,6 +234,27 @@ function isToday(timestamp) {
     && then.getDate() === now.getDate();
 }
 
+/** 采集日期键（本地时区），用于判断一份状态数据属于哪一天。
+ *
+ * 只认 `today_checked_in` 是不够的：控制台进程可以连开几天，机器休眠唤醒后
+ * 窗口还在，昨天查到的 true 会一直挂在界面上，显示成「今天已签到」。
+ * 字符串按 YYYY-MM-DD 前缀解析，避免依赖各运行时对 "YYYY-MM-DD HH:MM:SS"
+ * 这种非 ISO 写法的宽松解析。 */
+function dayKey(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'string') {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(value.trim());
+    if (m) return m[1] + '-' + Number(m[2]) + '-' + Number(m[3]);
+  }
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+}
+
+function todayKey() {
+  return dayKey(new Date());
+}
+
 function statusSuccessText(credit) {
   const amount = firstNum(credit);
   return amount != null && amount > 0
@@ -579,7 +600,8 @@ function firstNum(...vals) {
   return null;
 }
 
-function renderFromStatus(raw) {
+/** 渲染签到状态。at 缺省表示「刚查到」，缓存回填时必须传入当时的采集时间。 */
+function renderFromStatus(raw, at) {
   const d = unwrap(raw);
   if (!d) return;
 
@@ -591,20 +613,28 @@ function renderFromStatus(raw) {
                      'week_progress'].some((k) => k in d);
   if (!hasStatus) return;
 
-  const checked = d.today_checked_in === true || d.result === 'ALREADY'
-               || d.result === 'CLAIMED';
+  // 这份数据是什么时候采集的：实时查询就是现在，缓存回填由调用方传入 at。
+  // 「已签到」只有在采集于今天时才算数，否则只把数字当历史值展示、结论改成待查询。
+  const when = at || new Date();
+  try { d._at = when; } catch (e) { /* 只读对象不致命，退化成按实时处理 */ }
+  const fresh = dayKey(when) === todayKey();
+
+  const checked = fresh && (d.today_checked_in === true || d.result === 'ALREADY'
+                 || d.result === 'CLAIMED');
   const credit = firstNum(d.credit, d.today_credit, d.daily_credit);
   const streak = firstNum(d.streak_days);
   const total = firstNum(d.total_credits);
 
   setCard('vCredit', 'hCredit', credit,
-    credit != null ? (checked ? '今日已签到' : '今日未领取') : '未取到数据');
+    credit != null
+      ? (checked ? '今日已签到' : (fresh ? '今日未领取' : '今日尚未查询'))
+      : '未取到数据');
   setCard('vStreak', 'hStreak', streak, streak != null ? '连续签到' : '');
   setCard('vTotal', 'hTotal', total, total != null ? '历史累计' : '');
 
   const week = firstNum(d.week_checkin_days);
   const rows = [
-    ['今日已签', checked ? '是' : '否'],
+    ['今日已签', checked ? '是' : (fresh ? '否' : '待查询')],
     ['连签天数', streak],
     ['累计积分', total],
     ['连签奖励日', d.is_streak_day === true ? '是' : '否'],
@@ -676,9 +706,43 @@ function wbDotState(doctor, status, desktop) {
   return { kind: '', title: '尚未检测 WorkBuddy 登录态' };
 }
 
-function wbStatusChecked(status) {
-  return !!(status && (status.today_checked_in === true
-    || status.result === 'ALREADY' || status.result === 'CLAIMED'));
+/** 状态数据是否采集于今天。没有采集时间的（进程内刚拿到的实时结果）按今天算。 */
+function wbStatusFresh(status) {
+  const at = status && status._at;
+  if (!at) return true;
+  return dayKey(at) === todayKey();
+}
+
+/** 采集时刻的可读文案（统一 YYYY-MM-DD HH:MM:SS），用于「上次检测：…」这类提示。
+ *
+ * 不用 toLocaleString：同样的数据在不同机器上会变成「2026/11/9」或
+ * 「2026-11-09 22:48」，提示文案和日志里的时间对不上就没法对照排查。 */
+function wbStatusAtText(status) {
+  const at = status && status._at;
+  if (!at) return '未知时间';
+  const pad = (n) => String(n).padStart(2, '0');
+  if (typeof at === 'string') {
+    const m = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?/.exec(at.trim());
+    if (!m) return at;
+    let out = m[1] + '-' + pad(m[2]) + '-' + pad(m[3]);
+    if (m[4] !== undefined) {
+      out += ' ' + pad(m[4]) + ':' + m[5] + (m[6] ? ':' + m[6] : '');
+    }
+    return out;
+  }
+  const d = at instanceof Date ? at : new Date(at);
+  if (Number.isNaN(d.getTime())) return String(at);
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+    + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+/** 是否「今日已签到」。跨日的旧数据一律不算：缓存回填的昨天状态不能顶着今天的界面。 */
+function wbStatusChecked(status, at) {
+  if (!status) return false;
+  const when = at || status._at;
+  if (when && dayKey(when) !== todayKey()) return false;
+  return status.today_checked_in === true
+    || status.result === 'ALREADY' || status.result === 'CLAIMED';
 }
 
 /** 账号卡片用：当天成功领取过就保持「已签到」，不依赖后续 status 是否回显。 */
@@ -727,6 +791,17 @@ function wbSideEvent() {
     }
   }
 
+  // 采集时间不是今天（跨零点、或机器休眠唤醒后窗口一直没关）：昨天的结论既不能
+  // 说「已签到」，也不能凭它说「尚未签到」。先明确降级成待检测，
+  // 真正的结论由 wbMaybeRecheck() 补查后刷新。
+  if (status && !wbStatusFresh(status)) {
+    return {
+      kind: 'warn',
+      text: '今日尚未检测',
+      title: '上次检测：' + wbStatusAtText(status) + '，已跨日失效；等待重新检测今日签到状态',
+    };
+  }
+
   if (status) {
     if (result === 'INACTIVE') {
       return { kind: 'warn', text: '签到活动未开启。',
@@ -770,6 +845,82 @@ function wbSideEvent() {
 function wbSideState() {
   const event = wbSideEvent();
   wbSetDot(event.kind, event.title, event.text);
+}
+
+/* ---------- 跨日 / 休眠唤醒后的补查 ----------
+ *
+ * 首屏只在区块第一次可见时查一次 status，之后不再有周期性检测。控制台进程可以
+ * 连开几天，机器休眠一两天再唤醒时，界面上还挂着上次（可能是前天）查到的绿色
+ * 「已签到」。这里在三个便宜时机做一次「今天查过没有」的判断：
+ *   · 窗口重新可见（visibilitychange，含最小化还原）
+ *   · 窗口重新获得焦点（点击/切回）
+ *   · 每 5 分钟一次的定时器（休眠期间不推进，唤醒后立即补一次）
+ * 只有发现数据不是今天采集的才真发一次查询，绝不无谓地反复起子进程；
+ * 查询失败时按 1→2→4…→30 分钟退避，避免登录失效后每 5 分钟打一次网络。
+ */
+const WB_RECHECK_INTERVAL = 5 * 60 * 1000;
+const WB_RECHECK_MAX_DELAY = 30 * 60 * 1000;
+let WB_RECHECK_AT = 0;      // 上次补查尝试（ms）
+let WB_RECHECK_FAILS = 0;   // 连续失败次数，用于退避
+let WB_RECHECK_BOUND = false;
+
+function wbNeedsRecheck() {
+  if (BUSY) return false;
+  if (!CHECKIN_DONE) return false;      // 首屏那次查询还没结束，别和它抢同一个子进程
+  if (!WB_STATUS) return false;         // 没有历史状态，谈不上过期
+  return !wbStatusFresh(WB_STATUS);
+}
+
+function wbRecheckDelay() {
+  if (!WB_RECHECK_FAILS) return 60 * 1000;
+  return Math.min(WB_RECHECK_MAX_DELAY,
+    60 * 1000 * Math.pow(2, WB_RECHECK_FAILS - 1));
+}
+
+function wbMaybeRecheck() {
+  if (!wbNeedsRecheck()) {
+    WB_RECHECK_FAILS = 0;
+    return false;
+  }
+  const now = Date.now();
+  if (WB_RECHECK_AT && now - WB_RECHECK_AT < wbRecheckDelay()) return false;
+  WB_RECHECK_AT = now;
+
+  appendLog('界面上的签到状态停留在 ' + wbStatusAtText(WB_STATUS)
+    + '，跨日失效，重新查询今日状态…', 'meta');
+  // 先把「已签到」降级掉，再等查询结果，避免这几秒里继续显示过期结论
+  wbSideState();
+  renderWorkbuddyAccount();
+
+  runSeries(['status', 'doctor'], () => {
+    if (wbStatusFresh(WB_STATUS)) {
+      WB_RECHECK_FAILS = 0;
+    } else {
+      WB_RECHECK_FAILS += 1;
+      appendLog('今日签到状态暂未取到，' + Math.round(wbRecheckDelay() / 60000)
+        + ' 分钟后重试', 'warn');
+    }
+  });
+  return true;
+}
+
+function startWbRecheckWatch() {
+  if (WB_RECHECK_BOUND) return;
+  WB_RECHECK_BOUND = true;
+  const kick = () => {
+    try {
+      wbMaybeRecheck();
+    } catch (e) {
+      // 补查只是兜底，出错不能影响主流程
+    }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) kick();
+  });
+  window.addEventListener('focus', kick);
+  setInterval(() => {
+    if (!document.hidden) kick();
+  }, WB_RECHECK_INTERVAL);
 }
 
 /** 记录 WorkBuddy 本轮领取结果；当天有效，跨天自动失效。 */
@@ -873,6 +1024,9 @@ function renderWorkbuddyAccount() {
     status.daily_credit) : null;
   const streak = status ? firstNum(status.streak_days) : null;
   const checked = wbClaimedToday();
+  // 数据不是今天查的：数字当历史值展示，结论一律标成「待查询」，
+  // 否则跨日之后卡片会顶着昨天的「已签到」不放。
+  const fresh = status ? wbStatusFresh(status) : true;
 
   const badges = document.createElement('div');
   badges.className = 'ta-badges';
@@ -884,7 +1038,9 @@ function renderWorkbuddyAccount() {
   const metrics = document.createElement('div');
   metrics.className = 'ta-metrics';
   metrics.appendChild(accountMetricElement('今日积分', credit,
-    credit == null ? '尚未查询签到状态' : (checked ? '今日已签到' : '今日未领取')));
+    credit == null ? '尚未查询签到状态'
+      : (!fresh ? '上次查询结果（今日未更新）'
+        : (checked ? '今日已签到' : '今日未领取'))));
   metrics.appendChild(accountMetricElement('连签天数', streak,
     streak == null ? '尚未查询签到状态' : '连续签到'));
   metrics.appendChild(accountMetricElement('凭据', wbCredentialLabel(fmt),
@@ -915,8 +1071,11 @@ function renderWorkbuddyAccount() {
   box.appendChild(card);
   const at = $('wbAccountAt');
   if (at) {
-    at.textContent = '最近读取 '
-      + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+    // 跨日后的卡片仍在展示旧数据，时间要说清是「上次读取」，
+    // 不能让「最近读取 11:34」把两天前的数字说成刚查的。
+    at.textContent = status && !fresh
+      ? '上次读取 ' + wbStatusAtText(status) + '（今日未更新）'
+      : '最近读取 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
   }
 }
 
@@ -4916,8 +5075,11 @@ async function boot(api) {
     appendLog('已载入上次体检结果（' + cached.doctor.at + '）', 'meta');
   }
   if (cached.status) {
-    renderFromStatus(cached.status.payload);
-    appendLog('已载入上次签到状态（' + cached.status.at + '）', 'meta');
+    // 回填时必须带上采集时间：跨日之后这份数据只能当历史值，
+    // 否则开机第一秒就又是一片「已签到」（见 renderFromStatus 的 fresh 判定）。
+    renderFromStatus(cached.status.payload, cached.status.at);
+    appendLog('已载入上次签到状态（' + cached.status.at
+      + (wbStatusFresh(WB_STATUS) ? '' : '，非今日数据，等待重新检测') + '）', 'meta');
   }
   if (info.growth && info.growth.data) {
     renderGrowth(info.growth.data, info.growth.at);
@@ -4951,6 +5113,9 @@ async function boot(api) {
       maybeLoadGrowth();
     });
   });
+  // 跨日 / 休眠唤醒后补查今日状态：首屏那一次查完之后没有别的刷新点了，
+  // 不加这一层的话窗口开着一夜，第二天的界面仍是昨天的「已签到」。
+  startWbRecheckWatch();
   // 这两个区块只有 class 没有 id（$ 只查 id），必须用 querySelector。
   whenVisible('growth', document.querySelector('.pane-tasks'), () => {
     if (!info.signin_exists) return;
