@@ -95,7 +95,8 @@ def pre_checks():
     modules = ["test_locate_signin", "test_win_guard", "test_win_service",
                "test_win_icon", "test_win_geometry", "test_trae_backend",
                "test_data_dir", "test_service_recovery",
-               "test_schedule_jitter", "test_idle_trigger"]
+               "test_schedule_jitter", "test_idle_trigger",
+               "test_console_policy"]
     missing = [name for name in modules
                if not os.path.isfile(os.path.join(HERE, name + ".py"))]
     present = [name for name in modules if name not in missing]

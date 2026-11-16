@@ -167,14 +167,14 @@ Trae 同样使用独立的 `_TRAE_LOCK` 和 `_trae_busy` 状态。`trae_signin.p
 计划任务在后台跑，失败时没人看得见——日志里躺着「没有会话 Cookie 可续期，请重新导入本机登录态」，用户不会主动去翻。所以失败后按固定顺序处理：
 
 1. 把失败原文写进 `%LOCALAPPDATA%\Auto-Claim\dashboard\service-alert.json`（原子替换，界面不会读到半截 JSON）；
-2. 控制台没开着就启动它，已经开着就激活窗口。同一类型 6 小时内只拉一次，避免半夜每次轮询都弹窗；
+2. 拉起或激活控制台：默认关闭，整条自愈链路留在计划任务的 silent 进程里。只有显式设置 `WORKBUDDY_SURFACE_CONSOLE=1` 才恢复旧行为（同一类型 6 小时内只拉一次）；
 3. 重新导入本机登录态：WorkBuddy / Qoder 重读凭据文件，Trae 执行 `import_local()` 扫描客户端目录；
 4. 用任务剩余时间预算重试一次（首轮耗时 + 重试必须落在 `ExecutionTimeLimit` 内），结果回写记录；
 5. 重试成功时退出码归零，任务计划程序里显示成功；否则保留原始退出码并留下可读原因。
 
 控制台在对应模块（WorkBuddy / Qoder / Trae）的「计划任务」区块原样展示失败原文、重新导入结果和重试结论，并提供「重新导入并重试 / 知道了」两个按钮。提示随 `bootstrap()` 一起下发，之后每 20 秒读一次本地 JSON——读文件比每次起 PowerShell 便宜得多。
 
-`WORKBUDDY_NO_SURFACE=1` 可关闭「拉起窗口」这一步，排障或自动化测试时用；其余步骤照常执行。
+签到流程完全交予计划任务：控制台不会因为任务失败被主动唤起，用户想看时自己打开即可。旧配置 `WORKBUDDY_NO_SURFACE=1` 仍然有效；要恢复旧的失败弹窗行为，显式设置 `WORKBUDDY_SURFACE_CONSOLE=1`。其余步骤照常执行。
 
 ### QoderDailyCredits（独立任务）
 

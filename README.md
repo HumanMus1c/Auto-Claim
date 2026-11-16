@@ -107,7 +107,7 @@
 - 「立即运行」只启动第一个可运行的任务（优先签到任务），避免两个任务同时进入签到 / 成长中心。
 - 状态在空闲时每 3 分钟刷新一次，任务运行中每 20 秒刷新一次；停在 Qoder / Trae 页或窗口不可见时跳过轮询。
 - 打包运行时任务动作是 `Auto-Claim-dashboard.exe --service silent` / `--service silent-poll`，因此三个计划任务都不需要系统 Python；Qoder / Trae 在能找到系统 `pythonw.exe` 时优先用它，找不到才退回 `--qoder-service` / `--trae-service`。
-- **失败会自愈**：任务失败时把原文写进失败记录、拉起（或激活）控制台，在对应模块展示报错与重试结果，并自动重新导入本机登录态后重试一次。Trae 的「没有会话 Cookie 可续期，请重新导入本机登录态」就走这条链路，不再只是烂在日志里。
+- **失败会自愈，但不弹窗**：任务失败时把原文写进失败记录，自动重新导入本机登录态后重试一次，结果回写记录；签到与自愈全程留在计划任务的 silent 进程里，控制台只在用户手动打开时运行。Trae 的「没有会话 Cookie 可续期，请重新导入本机登录态」就走这条链路。需要恢复旧的失败弹窗行为时设置 `WORKBUDDY_SURFACE_CONSOLE=1`。
 - 若安装时报 `0x80070005`（拒绝访问），用登录 WorkBuddy 的同一 Windows 账号、以管理员身份启动控制台后再安装。提权只用于注册任务，任务本身仍以普通权限运行。
 
 ### 🎁 Qoder CN 独立监控页
@@ -480,6 +480,8 @@ Windows 上预算必须小于对应计划任务的 `ExecutionTimeLimit`（签到
 | `WORKBUDDY_DISABLE_GPU` | `1` 时给 WebView2 加 `--disable-gpu`，排查 DirectComposition 卡死 |
 | `WORKBUDDY_INSTANT_WINDOW` | `1` 时恢复「窗口立刻显示」，不等首帧 |
 | `WORKBUDDY_TRAY` | `0` 时不创建托盘图标（调试 / 截图用） |
+| `WORKBUDDY_SURFACE_CONSOLE` | `1` 时恢复「任务失败后主动拉起控制台」的旧行为；默认不设置，签到完全由计划任务托管 |
+| `WORKBUDDY_NO_SURFACE` | `1` 时强制关闭拉起窗口，优先于 `WORKBUDDY_SURFACE_CONSOLE`（兼容旧配置） |
 
 </details>
 
@@ -536,6 +538,7 @@ Auto-Claim/
 ├── qoder_signin.py                 # 上游 Qoder CN 领取脚本
 ├── trae_signin.py                  # 移植自 TraeTools 的多账号签到 / 用量后端
 ├── client_launcher.py              # 计划任务前静默拉起并隐藏目标客户端
+├── automation/windows/             # 本地自动更新 + 计划任务注册模板（默认不启动控制台）
 ├── install-windows.ps1             # 上游 WorkBuddy 计划任务安装
 ├── install-qoder-windows.ps1       # 上游 Qoder 计划任务安装
 ├── auto-claim.plist.example

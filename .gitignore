@@ -33,6 +33,8 @@ trae_signin.log
 # 脚本、任务 XML、注册脚本与日志现在住在 %LOCALAPPDATA%\AutoClaimUpdater\，
 # 仓库只是被拉取/被构建的目标；下面仍显式忽略，防止旧副本或误拷回被提交。
 update-and-build.ps1
+# 仓库内的安装模板要随仓库分发，只忽略本机安装目录里的那份。
+!automation/windows/update-and-build.ps1
 update-and-build.log
 update-and-build.log.*.txt
 AutoClaimUpdateBuild.xml
@@ -47,3 +49,4 @@ test_*.js
 *.test.js
 !dashboard/webview/test_idle_trigger.py
 !dashboard/webview/test_trae_backend.py
+!dashboard/webview/test_console_policy.py

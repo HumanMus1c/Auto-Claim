@@ -2593,13 +2593,15 @@ def _side_service_main(name, loader, argv):
 #
 # 计划任务在后台跑，失败只在日志里留一行，用户看不到。这里按固定顺序处理：
 #
-#   ① 写失败记录（控制台起来后第一眼就能看到原文）
-#   ② 拉起或激活控制台（同一类型 6 小时内只拉一次，避免半夜反复弹窗）
+#   ① 写失败记录（用户打开控制台后第一眼就能看到原文）
+#   ② 拉起或激活控制台——默认关闭，整条自愈链路留在计划任务的 silent 进程里；
+#      只有显式设置 WORKBUDDY_SURFACE_CONSOLE=1 才启用（6h 冷却）
 #   ③ 重新导入本机登录态（Trae 扫描客户端、WorkBuddy / Qoder 重读登录文件）
 #   ④ 用剩余时间预算重试一次，结果回写记录
 #
-# 第 ③ 步针对的就是「没有会话 Cookie 可续期，请重新导入本机登录态」：
-# 原样展示报错，同时真的去读一遍本机客户端的登录态，再重试。
+# 签到流程完全交给计划任务：控制台不会因任务失败被主动唤起，只在用户自己
+# 打开时运行。第 ③ 步针对的就是「没有会话 Cookie 可续期，请重新导入本机
+# 登录态」：原样展示报错，同时真的去读一遍本机客户端的登录态，再重试。
 
 SERVICE_TASK_NAME = {"workbuddy": "WorkBuddyAutoSignin",
                      "qoder": "QoderDailyCredits",
@@ -2790,9 +2792,15 @@ def _console_command():
 
 
 def _surface_console(kind, previous=None):
-    """把控制台叫到用户面前；返回一句结果说明（写进失败记录）。"""
-    if os.name != "nt" or os.environ.get("WORKBUDDY_NO_SURFACE") == "1":
-        # 非 Windows 没有计划任务；排障/自动化测试时也不想被弹窗打断。
+    """是否把控制台叫到用户面前；返回一句结果说明（写进失败记录）。
+
+    默认不唤起：签到与失败自愈都留在计划任务的 silent 进程里，控制台只在
+    用户手动打开时运行。要恢复旧的「失败时弹窗」行为，显式设置
+    WORKBUDDY_SURFACE_CONSOLE=1；旧的 WORKBUDDY_NO_SURFACE=1 仍可强制关闭。
+    """
+    if (os.name != "nt"
+            or os.environ.get("WORKBUDDY_NO_SURFACE") == "1"
+            or os.environ.get("WORKBUDDY_SURFACE_CONSOLE") != "1"):
         return "skipped"
 
     last = (previous or {}).get("surface_at") or 0
