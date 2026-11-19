@@ -27,10 +27,10 @@ if (-not (Test-Path $script)) {
     throw "找不到更新脚本：$script。请先把 automation/windows/update-and-build.ps1 复制到 $InstallDir"
 }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument @(
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (@(
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
     '-File', ('"{0}"' -f $script)
-) -WorkingDirectory $InstallDir
+) -join ' ') -WorkingDirectory $InstallDir
 
 # 每 2 小时一次；起始时间往后错 5 分钟，避开整点注册风暴。
 $start = (Get-Date).Date.AddMinutes(5)
@@ -50,7 +50,7 @@ $settings = New-ScheduledTaskSettingsSet `
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId ("{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME) `
-    -LogonType InteractiveToken -RunLevel Limited
+    -LogonType Interactive -RunLevel Limited
 
 $description = 'Auto-Claim local auto update: git pull + rebuild only. Sign-in is fully handled by scheduled tasks; never launches the console (every 2 hours, only while logged on and awake)'
 
