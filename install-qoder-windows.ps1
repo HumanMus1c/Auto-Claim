@@ -184,6 +184,9 @@ try {
         -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
         -IdleDuration (New-TimeSpan -Minutes 4) `
         -IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd -ErrorAction Stop
+    # 默认 Priority=7 会以 BELOW_NORMAL_PRIORITY_CLASS 启动任务，拉起的客户端
+    # 会继承降权；5 是交互任务使用的 NORMAL_PRIORITY_CLASS。
+    $settings.Priority = 5
 
     Register-ScheduledTask -TaskName $taskName -TaskPath "\" `
         -Action $action -Trigger $triggers -Settings $settings -Principal $principal `

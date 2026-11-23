@@ -10,6 +10,13 @@
 
 仅 Windows 生效。其他平台返回 ``unsupported``，不会尝试启动桌面端。
 设置 ``AUTO_CLAIM_LAUNCH_CLIENT=0`` 可整体关闭该行为。
+
+计划任务的默认 ``Priority=7`` 会让宿主进程以 ``BELOW_NORMAL_PRIORITY_CLASS``
+启动，子进程（桌面端）还会继承 IoPriority / MemoryPriority 的降权值。拉起时显式
+指定 ``NORMAL_PRIORITY_CLASS``，并把 Io/Memory 优先级改回正常值（2 / 5），避免
+任务结束后桌面端长期处于"后台 I/O + 低内存优先级"的半死状态。
+``AUTO_CLAIM_LAUNCH_VIA_SHELL=1`` 可改为委托 explorer.exe 启动，彻底断开优先级
+与 Job 继承链（代价是无法用 STARTF_USESHOWWINDOW 隐藏首个窗口，仍由后续扫描兜底）。
 """
 
 import ctypes
@@ -27,6 +34,7 @@ except Exception:  # pragma: no cover - 非 Windows 上的保守兜底
 
 IS_WINDOWS = sys.platform == "win32"
 ENV_SWITCH = "AUTO_CLAIM_LAUNCH_CLIENT"
+ENV_SHELL_LAUNCH = "AUTO_CLAIM_LAUNCH_VIA_SHELL"
 
 # 启动后最多等多久；Electron 冷启动通常 2-5 秒，留足余量但不拖垮任务预算。
 DEFAULT_WAIT_SECONDS = 12.0
@@ -40,6 +48,13 @@ TH32CS_SNAPPROCESS = 0x00000002
 SW_HIDE = 0
 DETACHED_PROCESS = 0x00000008
 CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+# 计划任务默认 Priority=7 对应 BELOW_NORMAL_PRIORITY_CLASS；显式拉回正常优先级。
+NORMAL_PRIORITY_CLASS = 0x00000020
+PROCESS_SET_INFORMATION = 0x0200
+PROCESS_MEMORY_PRIORITY = 28   # PROCESSINFOCLASS
+PROCESS_IO_PRIORITY = 33       # PROCESSINFOCLASS
+IO_PRIORITY_NORMAL = 2
+MEMORY_PRIORITY_NORMAL = 5
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 _CLIENTS = {
@@ -317,30 +332,128 @@ def find_client_exe(kind):
     return None
 
 
+def _clean_env():
+    """计划任务环境里如果残留 ELECTRON_RUN_AS_NODE，Electron 会当 Node 跑完就退。"""
+    return {key: value for key, value in os.environ.items()
+            if key.upper() != "ELECTRON_RUN_AS_NODE"}
+
+
+def _shell_launch_enabled():
+    value = os.environ.get(ENV_SHELL_LAUNCH, "").strip().lower()
+    return value not in ("", "0", "false", "no", "off")
+
+
+def _launch_via_shell(exe):
+    """委托桌面外壳（explorer.exe）启动客户端。
+
+    explorer.exe 会把请求交给当前登录会话里已有的外壳实例，由它创建客户端进程。
+    外壳不在计划任务的优先级链与 Job 里，因此优先级、IoPriority、MemoryPriority
+    全部是桌面上的正常值——这是比事后改信息类更彻底的断开方式。
+    返回的是短暂的 explorer.exe 进程；真正的客户端会继续存活，由后续窗口扫描兜底。
+    """
+    kwargs = {
+        "cwd": os.path.dirname(os.path.abspath(exe)) or None,
+        "env": _clean_env(),
+        "close_fds": True,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    proc = subprocess.Popen(["explorer.exe", exe], **kwargs)
+    return proc
+
+
+def _reset_child_priority(pid):
+    """把子进程从计划任务继承来的 Io/Memory 优先级恢复为正常值。
+
+    Windows 会在 CreateProcess 时让子进程继承父进程的 IoPriority 与 MemoryPriority；
+    仅靠 NORMAL_PRIORITY_CLASS 只能改优先级类，改不了这两项。这里用
+    ``SetProcessInformation`` 设 MemoryPriority=5，用 ``NtSetInformationProcess``
+    设 IoPriority=2。任何失败都只忽略：不同 Windows 版本对这些信息类的开放程度不同，
+    不能因为改优先级失败而让桌面端彻底起不来。
+    """
+    if not IS_WINDOWS or not pid:
+        return False
+    try:
+        kernel32 = ctypes.windll.kernel32
+        ntdll = ctypes.windll.ntdll
+        kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+        kernel32.CloseHandle.restype = ctypes.c_int
+        handle = kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
+        if not handle or handle == INVALID_HANDLE_VALUE:
+            return False
+        changed = False
+        try:
+            # MEMORY_PRIORITY_INFORMATION { ULONG MemoryPriority; }
+            class MEMORY_PRIORITY_INFORMATION(ctypes.Structure):
+                _fields_ = [("MemoryPriority", ctypes.c_ulong)]
+
+            info = MEMORY_PRIORITY_INFORMATION()
+            info.MemoryPriority = MEMORY_PRIORITY_NORMAL
+            kernel32.SetProcessInformation.argtypes = (
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong)
+            kernel32.SetProcessInformation.restype = ctypes.c_int
+            if kernel32.SetProcessInformation(
+                    handle, PROCESS_MEMORY_PRIORITY,
+                    ctypes.byref(info), ctypes.sizeof(info)):
+                changed = True
+
+            # ProcessIoPriority 没有公开的 kernel32 包装，只能走 ntdll。
+            io = ctypes.c_ulong(IO_PRIORITY_NORMAL)
+            ntdll.NtSetInformationProcess.argtypes = (
+                ctypes.c_void_p, ctypes.c_ulong, ctypes.c_void_p, ctypes.c_ulong)
+            ntdll.NtSetInformationProcess.restype = ctypes.c_long  # NTSTATUS
+            # NTSTATUS >= 0 即成功（含 INFO 级别的正数返回值）。
+            if ntdll.NtSetInformationProcess(
+                    handle, PROCESS_IO_PRIORITY,
+                    ctypes.byref(io), ctypes.sizeof(io)) >= 0:
+                changed = True
+        finally:
+            kernel32.CloseHandle(handle)
+        return changed
+    except Exception:
+        return False
+
+
 def _launch(exe):
-    """以隐藏窗口、脱离任务进程的方式启动客户端。"""
+    """以隐藏窗口、脱离任务进程、正常优先级的方式启动客户端。
+
+    优先级类在 CreateProcess 时通过 NORMAL_PRIORITY_CLASS 直接指定；IoPriority 和
+    MemoryPriority 在进程创建后由 ``_reset_child_priority`` 改回正常值。若设置了
+    ``AUTO_CLAIM_LAUNCH_VIA_SHELL=1``，则改走 explorer.exe 委托，从源头断开继承。
+    """
+    if IS_WINDOWS and _shell_launch_enabled():
+        try:
+            return _launch_via_shell(exe)
+        except OSError:
+            # 外壳未运行或 explorer.exe 不可用时，退回下面的直接启动路径。
+            pass
+
     startupinfo = subprocess.STARTUPINFO()
     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startupinfo.wShowWindow = SW_HIDE
-    # 计划任务环境里如果残留 ELECTRON_RUN_AS_NODE，Electron 会当 Node 跑完就退。
-    env = {key: value for key, value in os.environ.items()
-           if key.upper() != "ELECTRON_RUN_AS_NODE"}
+    base_flags = DETACHED_PROCESS | NORMAL_PRIORITY_CLASS
     kwargs = {
         "cwd": os.path.dirname(os.path.abspath(exe)) or None,
-        "env": env,
+        "env": _clean_env(),
         "close_fds": True,
         "stdin": subprocess.DEVNULL,
         "stdout": subprocess.DEVNULL,
         "stderr": subprocess.DEVNULL,
         "startupinfo": startupinfo,
-        "creationflags": DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
+        "creationflags": base_flags | CREATE_BREAKAWAY_FROM_JOB,
     }
     try:
-        return subprocess.Popen([exe], **kwargs)
+        proc = subprocess.Popen([exe], **kwargs)
     except OSError:
-        # 任务计划程序可能把子进程放进不允许 breakaway 的 Job；退回普通隐藏启动。
-        kwargs["creationflags"] = DETACHED_PROCESS
-        return subprocess.Popen([exe], **kwargs)
+        # 任务计划程序可能把子进程放进不允许 breakaway 的 Job；退回普通隐藏启动，
+        # 但 NORMAL_PRIORITY_CLASS 必须保留，否则又变回继承来的降权值。
+        kwargs["creationflags"] = base_flags
+        proc = subprocess.Popen([exe], **kwargs)
+    _reset_child_priority(getattr(proc, "pid", None))
+    return proc
 
 
 def _hide_windows_for_pids(pids):

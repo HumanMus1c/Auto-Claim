@@ -145,7 +145,8 @@ Trae 同样使用独立的 `_TRAE_LOCK` 和 `_trae_busy` 状态。`trae_signin.p
 
 操作按钮：
 
-- **安装 / 修复**：注册或更新两个任务。注册使用当前 Windows 账号、`Interactive`、`Limited` 权限，与手工安装脚本一致；需要二次确认。
+- **安装 / 修复**：注册或更新两个任务。注册使用当前 Windows 账号、`Interactive`、`Limited` 权限，与手工安装脚本一致；需要二次确认；新版会写入 `Priority=5`（正常），避免任务以 `BELOW_NORMAL_PRIORITY_CLASS` 启动并让拉起的客户端继承降权。
+- **同步后更新**：代码更新不会自动改已注册的任务。其它机器 `git pull` 后如何检查优先级、重建 exe 并更新任务，见 [同步代码后如何更新计划任务](scheduled-task-update.md)。
 - **启用 / 停用**：保留任务定义，只切换是否按计划自动运行。
 - **立即运行**：只启动第一个可运行的任务（优先 `WorkBuddyAutoSignin`），避免两个任务同时进入签到 / 成长中心。
 - **停止**：结束正在运行的任务。

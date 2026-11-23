@@ -192,6 +192,9 @@ try {
             -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
             -IdleDuration (New-TimeSpan -Minutes 4) `
             -IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd -ErrorAction Stop
+    # 默认 Priority=7 会以 BELOW_NORMAL_PRIORITY_CLASS 启动任务，拉起的桌面端
+    # 会继承降权；5 是交互任务使用的 NORMAL_PRIORITY_CLASS。
+    $set1.Priority = 5
     # 空闲触发与随机时刻并行：随机时刻负责分散，空闲触发负责兜底
     $tri1 += New-IdleTrigger
     Register-ScheduledTask -TaskName $currentTask -TaskPath "\" `
@@ -220,6 +223,7 @@ try {
             -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
             -IdleDuration (New-TimeSpan -Minutes 4) `
             -IdleWaitTimeout (New-TimeSpan -Minutes 30) -DontStopOnIdleEnd -ErrorAction Stop
+    $set2.Priority = 5
     $tri2 += New-IdleTrigger
     Register-ScheduledTask -TaskName $currentTask -TaskPath "\" `
         -Action $act2 -Trigger $tri2 -Settings $set2 -Principal $principal `

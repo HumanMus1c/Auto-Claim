@@ -10,7 +10,7 @@
 | `update-and-build.ps1` 的 `$LaunchConsole = $false` | 拉取 / 重编译后不再 `Start-Process` 补启控制台；编译前仍会关掉占用 exe 的进程以释放文件锁 |
 | 计划任务描述 | 明确 `never launches the console`，避免日后按旧描述「修复」回弹窗行为 |
 
-`AUTO_CLAIM_LAUNCH_CLIENT` 不在关闭范围内：它以隐藏窗口拉起 WorkBuddy / Qoder / Trae 桌面端，属于签到链路本身，不是控制台。
+`AUTO_CLAIM_LAUNCH_CLIENT` 不在关闭范围内：它以隐藏窗口拉起 WorkBuddy / Qoder / Trae 桌面端，属于签到链路本身，不是控制台。该拉起路径会以 `NORMAL_PRIORITY_CLASS` 创建客户端并重置 Io/Memory 优先级，同时签到任务的 `<Priority>` 为 5（正常）；若需要彻底断开计划任务的优先级与 Job 继承，可另设 `AUTO_CLAIM_LAUNCH_VIA_SHELL=1` 委托 `explorer.exe` 启动。
 
 ## 安装
 

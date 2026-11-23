@@ -665,6 +665,9 @@ def _install_script(runner, prefix_args, workdir):
             "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
             "-ExecutionTimeLimit (New-TimeSpan -Minutes %d) %s"
             % (spec["minutes"], IDLE_SETTINGS_PS),
+            # 默认 Priority=7 会以 BELOW_NORMAL_PRIORITY_CLASS 启动，拉起的桌面端
+            # 继承降权；5 是交互任务使用的 NORMAL_PRIORITY_CLASS。
+            "    $s.Priority = 5",
             # 每个基准点各自随机，注册后时刻就固定下来，直到下次运行后的重排
             "    $triggers = @()",
             "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
@@ -1066,6 +1069,9 @@ def _single_task_script(exe, args, workdir, spec, times, message):
         "-DontStopIfGoingOnBatteries -AllowStartIfOnBatteries "
         "-ExecutionTimeLimit (New-TimeSpan -Minutes %d) %s"
         % (spec["minutes"], IDLE_SETTINGS_PS),
+        # 默认 Priority=7 会以 BELOW_NORMAL_PRIORITY_CLASS 启动，拉起的客户端
+        # 继承降权；5 是交互任务使用的 NORMAL_PRIORITY_CLASS。
+        "    $s.Priority = 5",
         "    $triggers = @()",
         "    foreach ($t in @(%s)) {" % ",".join(_ps_quote(t) for t in times),
         "        $triggers += New-ScheduledTaskTrigger -Daily -At $t",
@@ -1378,6 +1384,7 @@ try {
             $a = New-ScheduledTaskAction -Execute $item.exe -Argument $item.args
         }
         $s = New-ScheduledTaskSettingsSet -StartWhenAvailable -Hidden -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes ([int]$item.minutes)) %s
+        $s.Priority = 5
         Register-ScheduledTask -TaskName $item.name -TaskPath '\' -Action $a -Trigger $triggers -Settings $s -Principal $principal -Description $item.description -Force | Out-Null
         $done += $item.name
     }

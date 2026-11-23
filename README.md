@@ -310,6 +310,26 @@ Auto-Claim-dashboard.exe
 
 计划任务开始前会先检查目标客户端：若 WorkBuddy / Qoder CN / Trae CN 未运行，就按 `WORKBUDDY_EXE` / `QODER_EXE` / `TRAE_EXE`、注册表和常见安装目录定位可执行文件，以隐藏窗口方式启动，并把随后出现的顶层窗口隐藏到托盘；已在运行则直接跳过。手工命令（`auto` / `status` / `doctor` 等）不会触发拉起。找不到客户端或启动失败只跳过，不影响签到本身。设置 `AUTO_CLAIM_LAUNCH_CLIENT=0` 可整体关闭该行为。
 
+#### 计划任务降权继承的修复
+
+Windows 任务计划程序的默认 `<Priority>7</Priority>` 会让宿主进程以 `BELOW_NORMAL_PRIORITY_CLASS` 启动，客户端被拉起时会继承这个降权以及 `IoPriority` / `MemoryPriority` 的后台值，任务结束后依然反应迟钝。现已从两处根治：
+
+1. 安装脚本把签到任务的优先级改为 `Priority=5`（交互任务使用的 `NORMAL_PRIORITY_CLASS`）；
+2. `client_launcher.py` 拉起客户端时显式传入 `NORMAL_PRIORITY_CLASS`，并用 `SetProcessInformation` / `NtSetInformationProcess` 把 `MemoryPriority` 改回 5、`IoPriority` 改回 2。
+
+**旧机器需要修复已注册的任务**（新安装的任务自动使用 `Priority=5`）。可以重新运行一次 `install-windows.ps1` / `install-qoder-windows.ps1`（或在控制台里重装），`-Force` 会覆盖已有任务；也可以只改优先级、不动触发时刻：
+
+```powershell
+Get-ScheduledTask -TaskName WorkBuddyAutoSignin,WorkBuddyGrowthPoll,QoderDailyCredits -ErrorAction SilentlyContinue |
+    ForEach-Object { $s = $_.Settings; $s.Priority = 5; Set-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -Settings $s }
+```
+
+不改的话，已注册的任务仍保留 `Priority=7`。
+
+如果所在环境禁用了上述信息类调用，可设置 `AUTO_CLAIM_LAUNCH_VIA_SHELL=1`，改为委托 `explorer.exe` 启动客户端，从源头断开优先级与 Job 继承链。若根本不需要自动拉起桌面端，设置 `AUTO_CLAIM_LAUNCH_CLIENT=0` 即可。
+
+其它机器同步代码后如何检查、重建 exe、更新已注册的任务，见 **[同步代码后如何更新计划任务](docs/scheduled-task-update.md)**。
+
 ---
 
 ## ⏰ 命令行与定时任务
@@ -431,6 +451,7 @@ Windows 上预算必须小于对应计划任务的 `ExecutionTimeLimit`（签到
 | `WORKBUDDY_BUDGET_SECONDS` | 单次运行网络请求时间预算；非法值会夹到安全范围并附 `config_warning` |
 | `WORKBUDDY_GROWTH_LOG_EMPTY` | 设为 `1` 时，轮询空跑也写日志 |
 | `AUTO_CLAIM_LAUNCH_CLIENT` | 全局开关；设为 `0` 时计划任务不再自动拉起桌面端 |
+| `AUTO_CLAIM_LAUNCH_VIA_SHELL` | 设为 `1` 时改由 `explorer.exe` 委托启动客户端，彻底断开计划任务的优先级与 Job 继承 |
 
 </details>
 
