@@ -60,10 +60,13 @@ INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 _CLIENTS = {
     "workbuddy": {
-        "processes": ("workbuddy.exe",),
+        # 新版（5.12+）根目录的 WorkBuddy.exe 只是拉起壳，真正常驻的 Electron
+        # 主进程叫 WorkBuddy-app.exe。只按 workbuddy.exe 判进程会把「客户端
+        # 已在运行」误判成没运行，于是每个计划任务都再拉起一份。
+        "processes": ("workbuddy.exe", "workbuddy-app.exe"),
         "env": "WORKBUDDY_EXE",
         "registry_tokens": ("workbuddy",),
-        "exe_names": ("WorkBuddy.exe",),
+        "exe_names": ("WorkBuddy.exe", "WorkBuddy-app.exe"),
         "folders": ("WorkBuddy", "WorkBuddyAI"),
     },
     "qoder": {

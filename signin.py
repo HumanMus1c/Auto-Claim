@@ -132,9 +132,9 @@ RECORD_ACTIONS = ("auto",) + IDLE_ACTIONS
 # WorkBuddy 的 7 个每日点、7 个轮询点、加上空闲补跑，只要桌面端不在就会
 # 反复拉起它——哪怕每次查出来的结果都是「已签到」。
 #
-# 现在只有两条路径会拉起：
-#   1. 状态查询确认「未签到」、真的要调领取接口之前；
-#   2. 本地凭据打不开/密钥不匹配，拉起桌面端让它刷新登录态后重试一次。
+# 现在只有一条路径会拉起：状态查询确认「未签到」、真的要调领取接口之前。
+# 凭据解密失败绝不能拉起客户端——解密失败通常和桌面端在不在无关（例如
+# WorkBuddy 新版把 WorkBuddy.exe 换成了拉起壳），那样只会每次任务都拉一遍。
 # _SCHEDULED_LAUNCH 保证手工命令永远不拉起；_CLIENT_LAUNCH_DONE 保证同一轮
 # 签到流程里最多拉起一次。每轮开始会重置，长驻的控制台服务不会因此失去
 # 后续任务的拉起能力；跨轮的重复由 client_launcher 的进程检查兜底。
@@ -458,29 +458,56 @@ def find_workbuddy_runtime():
     candidates = []
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA") or os.path.join(home, "AppData", "Local")
-        candidates.append(os.path.join(local, "Programs", "WorkBuddy", "WorkBuddy.exe"))
-        for name in ("ProgramFiles", "ProgramFiles(x86)"):
-            if os.environ.get(name):
-                candidates.append(os.path.join(os.environ[name], "WorkBuddy", "WorkBuddy.exe"))
+        install_roots = []
+        for base in (local, os.environ.get("ProgramFiles"), os.environ.get("ProgramFiles(x86)")):
+            if not base:
+                continue
+            for folder in ("WorkBuddy", "WorkBuddyAI"):
+                candidates.append(os.path.join(base, "Programs", folder, "WorkBuddy.exe"))
+                candidates.append(os.path.join(base, folder, "WorkBuddy.exe"))
+                install_roots.append(os.path.join(base, "Programs", folder))
+                install_roots.append(os.path.join(base, folder))
+        with closing(_windows_registry_runtimes()) as entries:
+            for path in entries:
+                candidates.append(path)
+                install_roots.append(ntpath.dirname(path))
+        # WorkBuddy 5.12+ 把根目录的 WorkBuddy.exe 改成了拉起壳，真正的 Electron
+        # 主程序在 versions/<ver>/WorkBuddy-app.exe。凭据助手用 ELECTRON_RUN_AS_NODE
+        # 跑 JS 时必须指向后者，否则只会拿到空输出（HELPER_PROTOCOL）。
+        # 版本号倒序取最新的一份；找不到时再退回旧路径，保持老版本兼容。
+        seen = set()
+        for root in install_roots:
+            try:
+                versions = sorted(os.scandir(os.path.join(root, "versions")),
+                                  key=lambda e: e.name, reverse=True)
+            except OSError:
+                continue
+            for entry in versions:
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+                exe = os.path.join(entry.path, "WorkBuddy-app.exe")
+                key = ntpath.normcase(exe)
+                if key in seen or not os.path.isfile(exe):
+                    continue
+                seen.add(key)
+                return os.path.abspath(exe)
     elif sys.platform == "darwin":
         candidates = [_mac_runtime(os.path.join(root, "WorkBuddy.app"))
                       for root in ("/Applications", os.path.join(home, "Applications"))]
     for path in candidates:
         if path and os.path.isfile(path) and (os.name == "nt" or os.access(path, os.X_OK)):
             return os.path.abspath(path)
-    if sys.platform == "win32":
-        with closing(_windows_registry_runtimes()) as entries:
-            registered = next(entries, None)
-        if registered:
-            return registered
     raise AuthError("RUNTIME_NOT_FOUND")
 
 
 def _ensure_client_running():
     """把 WorkBuddy 拉起来并隐藏到托盘；仅限计划任务，且一轮最多一次。
 
-    调用方必须已经确认「真的需要客户端」（要领取，或凭据需要刷新）。
-    单纯的签到状态探测绝不能调用它——那正是原先反复拉起的根源。
+    调用方必须已经确认「真的需要客户端」（状态查询确认未签、要领取）。
+    单纯的签到状态探测、凭据解密失败都不能调用它——那正是原先反复拉起的根源。
     任何失败都必须被吞掉：客户端没装、启动失败或隐藏窗口失败都不应影响
     签到本身。手工命令（auto / status / doctor 等）在这里直接返回。
     """
@@ -765,11 +792,6 @@ def build_headers(session):
     if auth.get("domain"):
         headers["X-Domain"] = auth["domain"]
     return headers
-
-
-def _headers_from(session):
-    """解密凭据并生成请求头，作为「重试一次」的最小单元。"""
-    return build_headers(resolve_session(session))
 
 
 def _request(url, headers, method="GET", payload=None, timeout=REQUEST_TIMEOUT):
@@ -1856,26 +1878,6 @@ def _record_idle(action, code):
         pass
 
 
-def _daily_with_auth_recovery(action, headers, endpoint, auth_file):
-    """跑一轮日常；服务端判定凭据过期时，拉起桌面端刷新后重试一次。
-
-    只在计划任务（silent*）里生效，且同一轮最多拉起一次客户端——探测阶段
-    仍然一次都不拉起。手工 auto 保持原样，不会因为这里多起一个进程。
-    """
-    code, out, quiet = run_daily(headers, endpoint)
-    if (not _SCHEDULED_LAUNCH or _CLIENT_LAUNCH_DONE
-            or out.get("result") not in ("AUTH_REJECTED", "FORBIDDEN")):
-        return code, out, quiet
-    # 服务端判定凭据过期：这是旧版「先拉起桌面端刷新凭据」真正能救回现场
-    # 的场景。拉起一次、重读凭据、整轮重试。
-    _ensure_client_running()
-    try:
-        headers = _headers_from(load_session_retry(auth_file))
-    except AuthError:
-        return code, out, quiet
-    return run_daily(headers, endpoint)
-
-
 def _run(action):
     """公开入口：空闲补跑去重 + 记录结果，实际流程在 _run_action()。"""
     if _idle_skip(action):
@@ -1944,26 +1946,18 @@ def _run_action(action):
         if action == "doctor":
             emit(run_doctor(session), action)
             return 0
-        headers = _headers_from(session)
+        session = resolve_session(session)
+        headers = build_headers(session)
     except AuthError as e:
-        if not _SCHEDULED_LAUNCH:
-            emit(e.output(), action)
-            return 1
-        # 凭据解密失败、密钥不匹配等：拉起桌面端让它刷新登录态，再读一次。
-        # 这是旧行为里「先拉起再读凭据」唯一真正有用的部分，保留下来；
-        # 探测阶段依然零拉起，因为这里只有凭据本身打不开才会进来。
-        _ensure_client_running()
-        try:
-            headers = _headers_from(load_session_retry(auth_file))
-        except AuthError as e2:
-            emit(e2.output(), action)
-            return 1
+        # 凭据打不开就如实报错。绝不能在这里拉起客户端：解密失败通常和
+        # 桌面端在不在无关（例如exe换成拉起壳），重试只会每次任务都拉一遍。
+        emit(e.output(), action)
+        return 1
 
     endpoint = ((session.get("auth") or {}).get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
 
     if action in ("auto", "silent"):
-        code, out, _ = _daily_with_auth_recovery(
-            action, headers, endpoint, auth_file)
+        code, out, _ = run_daily(headers, endpoint)
         emit(out, action)
         return code
 
@@ -1975,8 +1969,7 @@ def _run_action(action):
         # 一个查询请求，换来的是一天七次机会。
         # 空跑默认不落盘——一天要跑好几轮，全写进去只会把真正有价值的记录
         # 淹没在一串"Buddy 旅行中"里。要看完整过程就设 WORKBUDDY_GROWTH_LOG_EMPTY=1。
-        code, out, quiet = _daily_with_auth_recovery(
-            action, headers, endpoint, auth_file)
+        code, out, quiet = run_daily(headers, endpoint)
         out["trigger"] = "poll"
         if (not quiet) or _env_flag("WORKBUDDY_GROWTH_LOG_EMPTY"):
             emit(out, action)
