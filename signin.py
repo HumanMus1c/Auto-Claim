@@ -32,8 +32,10 @@ WORKBUDDY_AUTH_FILE 指定。任何模式下都不会打印令牌，可安全分
   python signin.py claim          # 仅领取签到（调试，幂等）
   python signin.py all            # 查签到状态 + 领取（调试）
 
-计划任务使用的 silent* 动作会在开始前检查 WorkBuddy 是否在运行；未运行则
-以隐藏窗口方式拉起并隐藏到托盘。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可关闭。
+计划任务的 silent* 动作把客户端拉起推迟到「真的要领取」时：探测是否已签到
+是纯 HTTP 查询，不需要桌面端在线，已签到时全程不再拉起客户端；同一轮最多
+拉起一次；跨轮由 client_launcher 的进程检查兜底。设置 AUTO_CLAIM_LAUNCH_CLIENT=0
+可整体关闭；手工命令（auto / status / doctor 等）永远不拉起。
 """
 
 import base64
@@ -122,6 +124,22 @@ POLL_ACTIONS = ("silent-poll", "silent-growth")
 IDLE_ACTIONS = ("silent",) + POLL_ACTIONS
 # 会产生一次真实签到结果的动作，跑完记下成败供空闲补跑判断
 RECORD_ACTIONS = ("auto",) + IDLE_ACTIONS
+
+# 客户端拉起的时机控制。
+#
+# 探测「今日是否已签到」只需要本地凭据 + 一次 HTTP 查询，和桌面端是否运行
+# 毫无关系。以前 silent 动作一进来就无条件拉起客户端，于是同一台机器上
+# WorkBuddy 的 7 个每日点、7 个轮询点、加上空闲补跑，只要桌面端不在就会
+# 反复拉起它——哪怕每次查出来的结果都是「已签到」。
+#
+# 现在只有两条路径会拉起：
+#   1. 状态查询确认「未签到」、真的要调领取接口之前；
+#   2. 本地凭据打不开/密钥不匹配，拉起桌面端让它刷新登录态后重试一次。
+# _SCHEDULED_LAUNCH 保证手工命令永远不拉起；_CLIENT_LAUNCH_DONE 保证同一轮
+# 签到流程里最多拉起一次。每轮开始会重置，长驻的控制台服务不会因此失去
+# 后续任务的拉起能力；跨轮的重复由 client_launcher 的进程检查兜底。
+_SCHEDULED_LAUNCH = False
+_CLIENT_LAUNCH_DONE = False
 
 AUTH_HELPER_TIMEOUT = 10.0
 AUTH_INPUT_LIMIT = 65536
@@ -459,13 +477,17 @@ def find_workbuddy_runtime():
 
 
 def _ensure_client_running():
-    """计划任务开始前尽量把 WorkBuddy 拉起来并隐藏到托盘。
+    """把 WorkBuddy 拉起来并隐藏到托盘；仅限计划任务，且一轮最多一次。
 
-    手工命令不调用这里；只有 silent 类动作才会触发。任何失败都必须被吞掉：
-    客户端没装、启动失败或隐藏窗口失败都不应影响签到本身。
+    调用方必须已经确认「真的需要客户端」（要领取，或凭据需要刷新）。
+    单纯的签到状态探测绝不能调用它——那正是原先反复拉起的根源。
+    任何失败都必须被吞掉：客户端没装、启动失败或隐藏窗口失败都不应影响
+    签到本身。手工命令（auto / status / doctor 等）在这里直接返回。
     """
-    if client_launcher is None:
+    global _CLIENT_LAUNCH_DONE
+    if client_launcher is None or not _SCHEDULED_LAUNCH or _CLIENT_LAUNCH_DONE:
         return
+    _CLIENT_LAUNCH_DONE = True
     exe = None
     try:
         exe = find_workbuddy_runtime()
@@ -743,6 +765,11 @@ def build_headers(session):
     if auth.get("domain"):
         headers["X-Domain"] = auth["domain"]
     return headers
+
+
+def _headers_from(session):
+    """解密凭据并生成请求头，作为「重试一次」的最小单元。"""
+    return build_headers(resolve_session(session))
 
 
 def _request(url, headers, method="GET", payload=None, timeout=REQUEST_TIMEOUT):
@@ -1681,6 +1708,10 @@ def run_auto(headers, endpoint):
     if dig(status, "today_checked_in") in (True, 1):
         return 0, _already_report(status)
 
+    # 探测已经明确「今日未签」，真的要领取了才拉起客户端。已签到的轮次
+    # 在上一行就返回了，不会走到这里——这正是本次改进要省掉的那些拉起。
+    _ensure_client_running()
+
     ccode, cbody = post(endpoint + "/v2/billing/meter/daily-checkin", headers, retry=True)
 
     if ccode in (CODE_NO_NETWORK, CODE_BUDGET_OUT):
@@ -1825,6 +1856,26 @@ def _record_idle(action, code):
         pass
 
 
+def _daily_with_auth_recovery(action, headers, endpoint, auth_file):
+    """跑一轮日常；服务端判定凭据过期时，拉起桌面端刷新后重试一次。
+
+    只在计划任务（silent*）里生效，且同一轮最多拉起一次客户端——探测阶段
+    仍然一次都不拉起。手工 auto 保持原样，不会因为这里多起一个进程。
+    """
+    code, out, quiet = run_daily(headers, endpoint)
+    if (not _SCHEDULED_LAUNCH or _CLIENT_LAUNCH_DONE
+            or out.get("result") not in ("AUTH_REJECTED", "FORBIDDEN")):
+        return code, out, quiet
+    # 服务端判定凭据过期：这是旧版「先拉起桌面端刷新凭据」真正能救回现场
+    # 的场景。拉起一次、重读凭据、整轮重试。
+    _ensure_client_running()
+    try:
+        headers = _headers_from(load_session_retry(auth_file))
+    except AuthError:
+        return code, out, quiet
+    return run_daily(headers, endpoint)
+
+
 def _run(action):
     """公开入口：空闲补跑去重 + 记录结果，实际流程在 _run_action()。"""
     if _idle_skip(action):
@@ -1840,7 +1891,12 @@ def _run(action):
 
 
 def _run_action(action):
+    global _SCHEDULED_LAUNCH, _CLIENT_LAUNCH_DONE
     _start_budget(action)
+    # 控制台exe在长驻进程里反复调用 _run()，拉起标记必须按轮重置，
+    # 否则第一轮拉过后，后面的任务/重试会因为标记还挂着而永远不再拉起。
+    _SCHEDULED_LAUNCH = action in IDLE_ACTIONS
+    _CLIENT_LAUNCH_DONE = False
     known = ("auto", "silent", "growth", "silent-poll", "silent-growth", "status", "claim", "all", "doctor")
     if action not in known:
         emit({"result": "ERROR",
@@ -1848,10 +1904,9 @@ def _run_action(action):
              action)
         return 2
 
-    # 计划任务运行前先确保桌面端在运行；手工调试命令保持原样，不启动客户端。
-    if action in ("silent", "silent-poll", "silent-growth"):
-        _ensure_client_running()
-
+    # 这里刻意不拉起客户端：签到状态探测是纯本地凭据 + HTTP 查询，
+    # 桌面端在不在都不影响结果。拉起推迟到 run_auto 确认「未签到」时，
+    # 或下面凭据打不开需要刷新登录态时。
     auth_file, looked_in = find_auth_file()
     env_override = os.environ.get("WORKBUDDY_AUTH_FILE")
     if not auth_file or not os.path.exists(auth_file):
@@ -1889,16 +1944,26 @@ def _run_action(action):
         if action == "doctor":
             emit(run_doctor(session), action)
             return 0
-        session = resolve_session(session)
-        headers = build_headers(session)
+        headers = _headers_from(session)
     except AuthError as e:
-        emit(e.output(), action)
-        return 1
+        if not _SCHEDULED_LAUNCH:
+            emit(e.output(), action)
+            return 1
+        # 凭据解密失败、密钥不匹配等：拉起桌面端让它刷新登录态，再读一次。
+        # 这是旧行为里「先拉起再读凭据」唯一真正有用的部分，保留下来；
+        # 探测阶段依然零拉起，因为这里只有凭据本身打不开才会进来。
+        _ensure_client_running()
+        try:
+            headers = _headers_from(load_session_retry(auth_file))
+        except AuthError as e2:
+            emit(e2.output(), action)
+            return 1
 
     endpoint = ((session.get("auth") or {}).get("endpoint") or DEFAULT_ENDPOINT).rstrip("/")
 
     if action in ("auto", "silent"):
-        code, out, _ = run_daily(headers, endpoint)
+        code, out, _ = _daily_with_auth_recovery(
+            action, headers, endpoint, auth_file)
         emit(out, action)
         return code
 
@@ -1910,7 +1975,8 @@ def _run_action(action):
         # 一个查询请求，换来的是一天七次机会。
         # 空跑默认不落盘——一天要跑好几轮，全写进去只会把真正有价值的记录
         # 淹没在一串"Buddy 旅行中"里。要看完整过程就设 WORKBUDDY_GROWTH_LOG_EMPTY=1。
-        code, out, quiet = run_daily(headers, endpoint)
+        code, out, quiet = _daily_with_auth_recovery(
+            action, headers, endpoint, auth_file)
         out["trigger"] = "poll"
         if (not quiet) or _env_flag("WORKBUDDY_GROWTH_LOG_EMPTY"):
             emit(out, action)

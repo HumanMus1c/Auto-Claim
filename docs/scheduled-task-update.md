@@ -152,3 +152,21 @@ Get-Process WorkBuddy,Qoder*,Trae* -ErrorAction SilentlyContinue |
 | `dashboard/win_service.py` | 控制台「安装 / 修复」写入 `Priority=5`（WorkBuddy / Qoder / Trae） |
 | `README.md` | 原理说明与快速修复命令 |
 | `docs/scheduled-task-update.md` | 本文，供其它机器同步后照做 |
+
+## 六、探测「已签到」不再拉起客户端
+
+三个签到脚本（`signin.py` / `qoder_signin.py` / `trae_signin.py`）已把客户端拉起从
+silent 动作的入口推迟到真正需要的时候：
+
+- 状态查询（WorkBuddy 的 `checkin-activity-status`、Qoder 的活动列表、Trae 的
+  `checkin_credits/status`）只用本地凭据 + HTTP，桌面端在不在都一样；已签到时
+  全程零拉起。
+- 只有确认未签、即将调用领取接口，或本地凭据打不开/服务端判定登录态失效时，
+  才会拉起一次客户端刷新凭据。同一轮签到流程最多拉起一次；`client_launcher`
+  原有的进程检查继续兜住跨轮重复。
+- 手工命令（`auto` / `status` / `doctor` 等）永远不拉起。
+
+这项改动只涉及 Python 脚本，不改任务注册、优先级或触发时刻，**无需重装计划任务**。
+源码运行拉完代码即生效；打包版仍需按第 0 步重建 exe。原来的
+`AUTO_CLAIM_LAUNCH_CLIENT=0` 开关依然有效，用来彻底关闭自动拉起。
+

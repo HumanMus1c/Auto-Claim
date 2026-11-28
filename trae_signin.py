@@ -30,8 +30,9 @@ CLI:
   python trae_signin.py usage
   python trae_signin.py import-local
 
-计划任务的 silent 动作会在开始前检查 Trae CN 是否在运行；未运行则以隐藏
-窗口方式拉起并隐藏到托盘。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可关闭。
+计划任务的 silent 动作把客户端拉起推迟到「真的要签到」时：签到状态查询
+（探测是否已签到）是纯 HTTP + 本地账号文件，桌面端在不在都一样，已签到时
+全程不拉起；同一轮最多拉起一次。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可整体关闭。
 
 退出码：0 成功/已签到；1 部分或全部失败；2 没有账号/登录态或参数错误。
 """
@@ -75,6 +76,10 @@ except Exception:
 # 只在 silent（计划任务）动作上去重，手工 auto / status 永远照常执行。
 IDLE_ACTIONS = ("silent",)
 RECORD_ACTIONS = ("auto", "silent")
+
+# 客户端只在「确认要签到」时拉起，探测阶段零拉起；同一轮最多一次。
+_SCHEDULED_LAUNCH = False
+_CLIENT_LAUNCH_DONE = False
 
 VERSION = "1.0.0"
 
@@ -2315,6 +2320,9 @@ def _checkin_one(store, account, index, count, quiet=False):
                 "message": "服务器显示今日已签到" + _renewed_note(renewed),
                 "renewed": renewed}
 
+    # status 已经明确「今日未签」，真的要领取了才拉起客户端。上面两处
+    # ALREADY 提前返回，探测阶段不会走到这里。同一轮多账号也只拉起一次。
+    _ensure_client_running()
     claim = api.claim()
     if not _status_ok(claim):
         return {"id": account["id"], "name": name, "ok": False,
@@ -2745,9 +2753,15 @@ def emit(out, action, quiet=False):
 # ---------------------------------------------------------------- CLI
 
 def _ensure_client_running():
-    """计划任务开始前尽量拉起 Trae CN 并隐藏到托盘。"""
-    if client_launcher is None:
+    """拉起 Trae CN 并隐藏到托盘；仅限计划任务，且一轮最多一次。
+
+    调用方必须已经确认「真的要签到」。状态查询（探测是否已签到）只靠本地
+    账号文件和 HTTP，绝不能调用这里。
+    """
+    global _CLIENT_LAUNCH_DONE
+    if client_launcher is None or not _SCHEDULED_LAUNCH or _CLIENT_LAUNCH_DONE:
         return
+    _CLIENT_LAUNCH_DONE = True
     try:
         client_launcher.ensure_client_running("trae")
     except Exception:
@@ -2799,10 +2813,13 @@ def run(action, account_id=None, days=None):
 
 
 def _run_action(action, account_id=None, days=None):
+    global _SCHEDULED_LAUNCH, _CLIENT_LAUNCH_DONE
     action = (action or "auto").lower()
-    # 只有计划任务使用的 silent 动作才自动拉起客户端；手工 auto 保持原样。
-    if action == "silent":
-        _ensure_client_running()
+    # 控制台 exe 在长驻进程里反复调用，拉起标记必须按轮重置。
+    _SCHEDULED_LAUNCH = action == "silent"
+    _CLIENT_LAUNCH_DONE = False
+    # 这里刻意不拉起客户端：状态查询只靠本地账号文件 + HTTP。真正要签到时
+    # 由 _checkin_one 在调用领取接口之前拉起，一轮最多一次。
     if action == "doctor":
         payload = doctor_payload()
     elif action == "status":

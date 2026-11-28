@@ -23,8 +23,9 @@ Windows 上凭据由 DPAPI + AES-256-GCM 保护，macOS 上由钥匙串 + AES-12
   python qoder_signin.py auto --dry-run   # 只报告会领到什么
   python qoder_signin.py auto --once      # 不做网络重试
 
-计划任务的 silent 动作会在开始前检查 Qoder CN 是否在运行；未运行则以隐藏
-窗口方式拉起并隐藏到托盘。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可关闭。
+计划任务的 silent 动作把客户端拉起推迟到「真的要领取」时：活动列表查询
+（探测是否已领取）是纯 HTTP 请求，桌面端在不在都一样，已领取时全程不拉起；
+同一轮最多拉起一次。设置 AUTO_CLAIM_LAUNCH_CLIENT=0 可整体关闭。
 
 退出码：0 已领/今日已领/无活动；1 失败；2 没有登录态或参数错误。
 """
@@ -66,6 +67,11 @@ except Exception:
 # 只在 silent（计划任务）动作上去重，手工 auto / status 永远照常执行。
 IDLE_ACTIONS = ("silent",)
 RECORD_ACTIONS = ("auto", "silent")
+
+# 客户端只在「确认要领取」或「凭据需要刷新」时拉起，探测阶段零拉起；
+# 同一轮签到流程里最多拉起一次；跨轮由 client_launcher 的进程检查兜底。
+_SCHEDULED_LAUNCH = False
+_CLIENT_LAUNCH_DONE = False
 
 VERSION = "1.0.0"
 
@@ -985,6 +991,9 @@ def claim_once(api, retry=True, dry_run=False):
             return _result("DRY_RUN",
                            "[dry-run] 可领取 %s（%s）" % (_credits_text(amount), keys),
                            http=code, campaign=keys, credits=amount)
+        # 列表查询已经确认「本周期有可领取项」，真的要写请求了才拉起客户端。
+        # 若查出来是「已领取」，上面就会直接返回，不会走到这里。
+        _ensure_client_running()
         return _claim_all(api, todo, retry=retry)
 
     if claimed:
@@ -1149,9 +1158,15 @@ def run_status(api):
 
 
 def _ensure_client_running():
-    """计划任务开始前尽量拉起 Qoder CN 并隐藏到托盘。"""
-    if client_launcher is None:
+    """拉起 Qoder CN 并隐藏到托盘；仅限计划任务，且一轮最多一次。
+
+    调用方必须已经确认「真的需要客户端」（要领取，或凭据打不开要刷新）。
+    活动列表查询（探测本周期是否已领取）是纯 HTTP，绝不能调用这里。
+    """
+    global _CLIENT_LAUNCH_DONE
+    if client_launcher is None or not _SCHEDULED_LAUNCH or _CLIENT_LAUNCH_DONE:
         return
+    _CLIENT_LAUNCH_DONE = True
     try:
         client_launcher.ensure_client_running("qoder")
     except Exception:
@@ -1209,16 +1224,37 @@ def run(action, dry_run=False, once=False, base_url=None):
     return code
 
 
+def _resolve_token_for_action():
+    """取本机登录态；计划任务里凭据打不开时拉起桌面端刷新后重试一次。
+
+    活动列表查询（探测是否已领取）是纯 HTTP，不需要桌面端在线；这里只在
+    凭据本身读不出来时才可能拉起，而且一轮最多一次。手工命令不拉起。
+    """
+    try:
+        return _resolve_token()
+    except QoderAuthError as exc:
+        if not _SCHEDULED_LAUNCH:
+            raise
+        _ensure_client_running()
+        try:
+            return _resolve_token()
+        except QoderAuthError:
+            pass
+        raise exc
+
+
 def _run_action(action, dry_run=False, once=False, base_url=None):
+    global _SCHEDULED_LAUNCH, _CLIENT_LAUNCH_DONE
+    # 控制台 exe 在长驻进程里反复调用，拉起标记必须按轮重置。
+    _SCHEDULED_LAUNCH = action == "silent"
+    _CLIENT_LAUNCH_DONE = False
     if action not in ("auto", "silent", "status", "doctor"):
         out = _result("ERROR", "未知命令：%s（可用：auto / silent / status / doctor）" % action)
         emit(out, action)
         return 2
 
-    # 只有计划任务使用的 silent 动作才自动拉起客户端；手工 auto 保持原样。
-    if action == "silent":
-        _ensure_client_running()
-
+    # 这里刻意不拉起客户端：探测本周期是否已领取只需要本地凭据 + 一次
+    # HTTP 查询。拉起推迟到 claim_once 确认「有可领取项」时。
     if action == "doctor":
         out = run_doctor()
         emit(out, action)
@@ -1227,7 +1263,7 @@ def _run_action(action, dry_run=False, once=False, base_url=None):
         return 2 if out.get("result") == "NO_AUTH" else 1
 
     try:
-        token, sess = _resolve_token()
+        token, sess = _resolve_token_for_action()
     except QoderAuthError as exc:
         return _auth_failure(exc, action)
 
@@ -1247,6 +1283,18 @@ def _run_action(action, dry_run=False, once=False, base_url=None):
         return code
 
     out = claim_once(api, retry=not once, dry_run=dry_run)
+    if (_SCHEDULED_LAUNCH and not _CLIENT_LAUNCH_DONE and not dry_run
+            and out.get("result") in ("AUTH_REJECTED", "FORBIDDEN")):
+        # 服务端判定登录态失效：旧版「先拉起桌面端」唯一真正能救回的场景。
+        _ensure_client_running()
+        try:
+            token, sess = _resolve_token()
+        except QoderAuthError:
+            pass
+        else:
+            api = Api(token, base_url or os.environ.get("QODER_BASE_URL") or DEFAULT_BASE_URL,
+                      risk_headers(sess.get("_auth_dir")))
+            out = claim_once(api, retry=not once, dry_run=dry_run)
     if sess.get("expiresAt"):
         out["token_expires_at"] = sess.get("expiresAt")
     quiet = out.get("result") in QUIET_RESULTS and not out.get("needs_attention")
